@@ -1,0 +1,96 @@
+apiVersion: postgresql.k8s.enterprisedb.io/v1
+kind: Cluster
+metadata:
+  name: edb-spiffe-cluster
+  namespace: edb
+spec:
+  instances: 1
+  
+  # PostgreSQL version
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.2
+  
+  # Storage configuration
+  storage:
+    size: 1Gi
+    storageClass: gp3-csi
+  
+  # Enable superuser access for admin tasks
+  enableSuperuserAccess: true
+  
+  # Mount SPIRE CA bundle as a volume for client certificate verification
+  projectedVolumeTemplate:
+    sources:
+      - secret:
+          name: spire-ca-bundle
+          items:
+            - key: ca.crt
+              path: spire-ca.crt
+  
+  # PostgreSQL configuration for certificate authentication
+  postgresql:
+    parameters:
+      ssl_min_protocol_version: "TLSv1.2"
+      # Point to the mounted SPIRE CA for client verification
+      ssl_ca_file: "/projected/spire-ca.crt"
+      
+      # Logging for debugging
+      log_connections: "on"
+      log_disconnections: "on"
+      log_statement: "all"
+    
+    # pg_hba.conf - Client Authentication Configuration
+    pg_hba:
+      # Allow certificate-based authentication from any host
+      # clientcert=verify-ca means verify the client cert is signed by ssl_ca_file
+      - hostssl all all 0.0.0.0/0 cert clientcert=verify-ca map=spiffe-map
+      # Allow local connections for admin/postgres user
+      - local all postgres peer
+      - host all postgres 127.0.0.1/32 trust
+      # Standard password auth as fallback for internal connections
+      - host all all 10.0.0.0/8 scram-sha-256
+    
+    # pg_ident.conf - User Name Mapping
+    pg_ident:
+      # Map certificate CN to PostgreSQL users
+      # Format: map-name system-username database-username
+      - spiffe-map db-client-app app_readonly
+      - spiffe-map db-admin-app app_admin
+      - spiffe-map db-writer-app app_readwrite
+  
+  # Bootstrap configuration - create database and roles
+  bootstrap:
+    initdb:
+      database: appdb
+      owner: postgres
+      postInitSQL:
+        - |
+          -- Create roles with different permission levels
+          CREATE ROLE app_readonly WITH LOGIN;
+          CREATE ROLE app_readwrite WITH LOGIN;
+          CREATE ROLE app_admin WITH LOGIN CREATEDB CREATEROLE;
+          
+          -- Grant connect permissions
+          GRANT CONNECT ON DATABASE appdb TO app_readonly;
+          GRANT CONNECT ON DATABASE appdb TO app_readwrite;
+          GRANT CONNECT ON DATABASE appdb TO app_admin;
+          
+          -- Create a sample table
+          CREATE TABLE IF NOT EXISTS demo_data (
+              id SERIAL PRIMARY KEY,
+              name VARCHAR(100) NOT NULL,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              created_by VARCHAR(100)
+          );
+          
+          -- Grant permissions to roles
+          GRANT SELECT ON ALL TABLES IN SCHEMA public TO app_readonly;
+          GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO app_readwrite;
+          GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO app_admin;
+          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app_readwrite;
+          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app_admin;
+          
+          -- Insert sample data
+          INSERT INTO demo_data (name, created_by) VALUES 
+            ('Sample Record 1', 'system'),
+            ('Sample Record 2', 'system'),
+            ('Sample Record 3', 'system');

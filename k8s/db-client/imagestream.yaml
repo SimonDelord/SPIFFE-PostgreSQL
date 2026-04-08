@@ -1,0 +1,10 @@
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: db-client-app
+  namespace: spiffe-edb-demo
+  labels:
+    app: db-client-app
+spec:
+  lookupPolicy:
+    local: true

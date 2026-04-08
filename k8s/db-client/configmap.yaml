@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: db-client-config
+  namespace: spiffe-edb-demo
+data:
+  # Database connection settings
+  DB_HOST: "edb-spiffe-postgres.edb.svc.cluster.local"
+  DB_PORT: "5432"
+  DB_NAME: "appdb"
+  DB_USER: "app_readonly"
+  DB_SSLMODE: "require"
+  
+  # SPIFFE certificate paths (mounted by CSI driver)
+  SPIFFE_CERT_PATH: "/spiffe-workload-api/svid.pem"
+  SPIFFE_KEY_PATH: "/spiffe-workload-api/svid-key.pem"
+  SPIFFE_BUNDLE_PATH: "/spiffe-workload-api/bundle.pem"

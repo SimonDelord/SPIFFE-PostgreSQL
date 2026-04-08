@@ -1,0 +1,24 @@
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: db-client-workload
+spec:
+  # SPIFFE ID template - the identity issued to this workload
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}"
+  
+  # Select pods with this label
+  podSelector:
+    matchLabels:
+      spiffe.io/spiffe-id: "db-client-app"
+  
+  # Namespace selector (optional - restrict to specific namespaces)
+  namespaceSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: spiffe-demo
+  
+  # DNS names to include in the certificate (optional)
+  dnsNameTemplates:
+    - "{{ .PodMeta.Name }}.{{ .PodMeta.Namespace }}.svc.cluster.local"
+  
+  # TTL for the SVID
+  ttl: "1h"

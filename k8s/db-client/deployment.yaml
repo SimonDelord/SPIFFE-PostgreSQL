@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: db-client-app
+  namespace: spiffe-edb-demo
+  labels:
+    app: db-client-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: db-client-app
+  template:
+    metadata:
+      labels:
+        app: db-client-app
+        spiffe.io/spiffe-id: "db-client-app"
+    spec:
+      serviceAccountName: db-client-app
+      containers:
+        - name: db-client
+          image: image-registry.openshift-image-registry.svc:5000/spiffe-edb-demo/db-client-app:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: DB_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: db-client-config
+                  key: DB_HOST
+            - name: DB_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: db-client-config
+                  key: DB_PORT
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: db-client-config
+                  key: DB_NAME
+            - name: DB_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: db-client-config
+                  key: DB_USER
+            - name: DB_SSLMODE
+              valueFrom:
+                configMapKeyRef:
+                  name: db-client-config
+                  key: DB_SSLMODE
+            # SPIFFE paths
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: "unix:///spiffe-workload-api/spire-agent.sock"
+          volumeMounts:
+            - name: spiffe-workload-api
+              mountPath: /spiffe-workload-api
+              readOnly: true
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+      volumes:
+        - name: spiffe-workload-api
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true

@@ -1,0 +1,16 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: db-client-app
+  namespace: spiffe-edb-demo
+  labels:
+    app: db-client-app
+spec:
+  to:
+    kind: Service
+    name: db-client-app
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
