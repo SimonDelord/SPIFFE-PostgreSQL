@@ -1,0 +1,13 @@
+# SPIFFE CSI Driver Configuration
+# Enables mounting the Workload API socket into pods
+apiVersion: operator.openshift.io/v1alpha1
+kind: SpiffeCSIDriver
+metadata:
+  name: cluster
+spec:
+  # Must match SpireAgent socketPath
+  agentSocketPath: "/run/spire/agent-sockets"
+  
+  # CSI driver name - used in pod volume definitions
+  # Pods reference this with: csi.driver: csi.spiffe.io
+  pluginName: "csi.spiffe.io"

@@ -1,4 +1,4 @@
-# EDB Use Case: SPIFFE X.509 Certificate Authentication with PostgreSQL
+# SPIFFE X.509 Certificate Authentication with PostgreSQL
 
 This demo shows how a **SPIFFE-enabled application** uses its **X.509-SVID** (certificate) to authenticate to a **PostgreSQL database**, with the database performing both **authentication** (certificate verification) and **authorization** (role-based permissions).
 
@@ -16,6 +16,8 @@ This demo shows how a **SPIFFE-enabled application** uses its **X.509-SVID** (ce
 8. [How It Works](#how-it-works)
 9. [Troubleshooting](#troubleshooting)
 10. [Key Learnings](#key-learnings)
+
+**See also:** [SPIRE Setup Guide](spire-setup/README.md) - How to install and configure SPIRE via the Zero Trust Workload Identity Manager Operator.
 
 ---
 
@@ -132,8 +134,9 @@ This demo shows how a **SPIFFE-enabled application** uses its **X.509-SVID** (ce
 
 ## Prerequisites
 
-- OpenShift cluster (tested on ROSA)
+- OpenShift cluster (tested on ROSA, OCP 4.14+)
 - **SPIRE deployed** via Zero Trust Workload Identity Manager operator
+  - See [SPIRE Setup Guide](spire-setup/README.md) for installation instructions
 - `oc` CLI with cluster-admin access
 - The `edb` namespace must exist
 
@@ -142,8 +145,21 @@ This demo shows how a **SPIFFE-enabled application** uses its **X.509-SVID** (ce
 ## File Structure
 
 ```
-EDB use case/
+SPIFFE-PostgreSQL/
 ├── README.md                           # This documentation
+│
+├── spire-setup/                        # SPIRE installation guide
+│   ├── README.md                       # Detailed setup instructions
+│   ├── deploy-spire.sh                 # Automated deployment script
+│   └── k8s/                            # SPIRE configuration files
+│       ├── 01-namespace.yaml
+│       ├── 02-operatorgroup.yaml
+│       ├── 03-subscription.yaml
+│       ├── 04-zerotrustworkloadidentitymanager.yaml
+│       ├── 05-spireserver.yaml
+│       ├── 06-spireagent.yaml
+│       ├── 07-spiffecsidriver.yaml
+│       └── 08-spireoidcdiscoveryprovider.yaml
 │
 ├── k8s/
 │   ├── edb/                            # PostgreSQL database resources

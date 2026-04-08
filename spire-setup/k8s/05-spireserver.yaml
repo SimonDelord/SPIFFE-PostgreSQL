@@ -1,0 +1,43 @@
+# SPIRE Server Configuration
+# Update jwtIssuer to match your OIDC Discovery Provider route URL
+apiVersion: operator.openshift.io/v1alpha1
+kind: SpireServer
+metadata:
+  name: cluster
+spec:
+  # Logging
+  logLevel: "info"
+  logFormat: "text"
+  
+  # IMPORTANT: Update this to match your OIDC Discovery Provider route
+  # This must match the SpireOIDCDiscoveryProvider jwtIssuer exactly
+  # Example: https://oidc-discovery.apps.rosa.my-cluster.xxxx.p3.openshiftapps.com
+  jwtIssuer: "https://oidc-discovery.apps.YOUR-CLUSTER-DOMAIN.com"
+  
+  # Certificate validity periods
+  caValidity: "24h"           # How long the CA certificate is valid
+  defaultX509Validity: "1h"   # Default TTL for X.509-SVIDs
+  defaultJWTValidity: "5m"    # Default TTL for JWT-SVIDs
+  
+  # JWT signing key type (rsa-2048 or ec-p256)
+  jwtKeyType: "rsa-2048"
+  
+  # CA certificate subject
+  caSubject:
+    country: "US"
+    organization: "My Organization"
+    commonName: "SPIRE Server CA"
+  
+  # Persistent storage for SPIRE datastore
+  persistence:
+    size: "1Gi"
+    accessMode: "ReadWriteOnce"
+  
+  # Datastore configuration (SQLite for single-server deployment)
+  datastore:
+    databaseType: "sqlite3"
+    connectionString: "/run/spire/data/datastore.sqlite3"
+    maxOpenConns: 100
+    maxIdleConns: 10
+    connMaxLifetime: 0
+    disableMigration: "false"

@@ -1,0 +1,36 @@
+# SPIRE Agent Configuration
+# Deploys as DaemonSet (one per node)
+apiVersion: operator.openshift.io/v1alpha1
+kind: SpireAgent
+metadata:
+  name: cluster
+spec:
+  # Path where the agent exposes the Workload API socket
+  socketPath: "/run/spire/agent-sockets"
+  
+  # Logging
+  logLevel: "info"
+  logFormat: "text"
+  
+  # Node attestation - how the agent proves its identity to the server
+  nodeAttestor:
+    # Use Kubernetes Projected Service Account Tokens (PSAT)
+    # This is the recommended method for Kubernetes/OpenShift
+    k8sPSATEnabled: "true"
+  
+  # Workload attestation - how workloads prove their identity to the agent
+  workloadAttestors:
+    # Use Kubernetes metadata for workload attestation
+    k8sEnabled: "true"
+    
+    # Verification settings
+    workloadAttestorsVerification:
+      type: "auto"
+      hostCertBasePath: "/etc/kubernetes"
+      hostCertFileName: "kubelet-ca.crt"
+    
+    # Enable container selectors for fine-grained identity
+    disableContainerSelectors: "false"
+    
+    # Use improved container locator
+    useNewContainerLocator: "true"

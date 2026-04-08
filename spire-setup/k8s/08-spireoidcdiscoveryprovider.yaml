@@ -1,0 +1,23 @@
+# SPIRE OIDC Discovery Provider Configuration
+# Exposes SPIFFE identities as OIDC-compatible JWTs
+apiVersion: operator.openshift.io/v1alpha1
+kind: SpireOIDCDiscoveryProvider
+metadata:
+  name: cluster
+spec:
+  # Logging
+  logLevel: "info"
+  logFormat: "text"
+  
+  # Must match SpiffeCSIDriver pluginName
+  csiDriverName: "csi.spiffe.io"
+  
+  # IMPORTANT: Must match SpireServer jwtIssuer exactly
+  # Example: https://oidc-discovery.apps.rosa.my-cluster.xxxx.p3.openshiftapps.com
+  jwtIssuer: "https://oidc-discovery.apps.YOUR-CLUSTER-DOMAIN.com"
+  
+  # Number of replicas (1 is sufficient for most cases)
+  replicaCount: 1
+  
+  # Automatically create OpenShift Route
+  managedRoute: "true"
