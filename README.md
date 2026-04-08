@@ -262,6 +262,116 @@ spec:
       targetPort: 5432
 ```
 
+#### Understanding the Service TLS Certificate Annotation
+
+This annotation uses **OpenShift Service Serving Certificates**, a built-in feature that automatically generates and manages TLS certificates for services.
+
+**How It Works:**
+
+When you add the annotation `service.beta.openshift.io/serving-cert-secret-name: postgres-server-tls`, OpenShift's **Service CA Operator** automatically:
+
+1. **Generates a TLS certificate** signed by the cluster's internal Service CA
+2. **Creates a Secret** named `postgres-server-tls` containing:
+   - `tls.crt` - The server certificate
+   - `tls.key` - The private key
+3. **Auto-rotates** the certificate before expiration
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    OpenShift Service CA Flow                         │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  1. You create Service with annotation                               │
+│     ┌──────────────────────────────────────────────────────────┐    │
+│     │  service.beta.openshift.io/serving-cert-secret-name:     │    │
+│     │    postgres-server-tls                                    │    │
+│     └──────────────────────────────────────────────────────────┘    │
+│                              │                                       │
+│                              ▼                                       │
+│  2. Service CA Operator detects annotation                          │
+│     ┌─────────────────────┐                                         │
+│     │  Service CA         │                                         │
+│     │  Operator           │──────► Generates certificate for:       │
+│     │  (watches services) │        edb-spiffe-postgres.edb.svc      │
+│     └─────────────────────┘                                         │
+│                              │                                       │
+│                              ▼                                       │
+│  3. Creates Secret automatically                                     │
+│     ┌──────────────────────────────────────────────────────────┐    │
+│     │  Secret: postgres-server-tls                              │    │
+│     │  ├── tls.crt  (certificate for the service)              │    │
+│     │  └── tls.key  (private key)                              │    │
+│     └──────────────────────────────────────────────────────────┘    │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Why We Need It:**
+
+PostgreSQL requires **server-side TLS** to:
+- **Encrypt connections** between clients and the database
+- **Prove server identity** to connecting clients
+
+| Without This Annotation | With This Annotation |
+|-------------------------|----------------------|
+| Manually generate certificates | OpenShift auto-generates them |
+| Manually manage certificate rotation | OpenShift auto-rotates them |
+| Complex PKI setup required | Simple annotation |
+| Certificates could expire unnoticed | Always valid |
+
+**The Two Certificates in Our Setup:**
+
+Our PostgreSQL setup uses **two different CAs** for different purposes:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                  PostgreSQL TLS Configuration                        │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  SERVER CERTIFICATE (OpenShift Service CA)                          │
+│  ─────────────────────────────────────────                          │
+│  Purpose: PostgreSQL proves its identity to clients                 │
+│  Source:  service.beta.openshift.io/serving-cert-secret-name        │
+│  Used in: ssl_cert_file, ssl_key_file                               │
+│                                                                      │
+│     ┌─────────────┐          ┌─────────────────┐                    │
+│     │  OpenShift  │ signs    │  postgres-      │                    │
+│     │  Service CA │─────────►│  server-tls     │                    │
+│     └─────────────┘          │  Secret         │                    │
+│                              └─────────────────┘                    │
+│                                                                      │
+│  CLIENT CA (SPIRE CA)                                               │
+│  ────────────────────                                               │
+│  Purpose: PostgreSQL verifies client certificates                   │
+│  Source:  SPIRE trust bundle (spire-ca-bundle secret)               │
+│  Used in: ssl_ca_file                                               │
+│                                                                      │
+│     ┌─────────────┐          ┌─────────────────┐                    │
+│     │  SPIRE      │ signs    │  Client App     │                    │
+│     │  CA         │─────────►│  X.509-SVID     │                    │
+│     └─────────────┘          └─────────────────┘                    │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**In `postgresql.conf`:**
+
+```ini
+# Server presents this certificate to clients (from OpenShift Service CA)
+ssl_cert_file = '/var/lib/postgresql/server-certs/tls.crt'
+ssl_key_file = '/var/lib/postgresql/server-certs/tls.key'
+
+# Server uses this CA to verify CLIENT certificates (from SPIRE)
+ssl_ca_file = '/var/lib/postgresql/client-ca/ca.crt'
+```
+
+| Component | Purpose | Source |
+|-----------|---------|--------|
+| **Server TLS** (OpenShift annotation) | PostgreSQL proves it's the real database | OpenShift Service CA |
+| **Client CA** (SPIRE bundle) | PostgreSQL verifies SPIFFE client certs | SPIRE CA |
+
+> **Note:** The OpenShift Service CA annotation is a convenience feature that saves you from manually managing server certificates. It is unrelated to SPIFFE, but necessary for PostgreSQL to support TLS connections.
+
 ---
 
 ### 2. SPIFFE Client Configuration
