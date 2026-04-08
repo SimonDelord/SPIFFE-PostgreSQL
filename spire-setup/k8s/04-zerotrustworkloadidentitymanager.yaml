@@ -1,4 +1,4 @@
-# Update trustDomain and clusterName to match your environment
+# Zero Trust Workload Identity Manager configuration
 apiVersion: operator.openshift.io/v1alpha1
 kind: ZeroTrustWorkloadIdentityManager
 metadata:
@@ -7,12 +7,6 @@ metadata:
     app.kubernetes.io/name: zero-trust-workload-identity-manager
     app.kubernetes.io/managed-by: zero-trust-workload-identity-manager
 spec:
-  # IMPORTANT: Update this to your cluster's apps domain
-  # Example: apps.rosa.my-cluster.xxxx.p3.openshiftapps.com
-  trustDomain: "apps.YOUR-CLUSTER-DOMAIN.com"
-  
-  # Name identifier for this cluster
-  clusterName: "my-cluster"
-  
-  # ConfigMap that will contain the SPIRE CA bundle
+  trustDomain: "apps.rosa.rosa-v99n5.8ie9.p3.openshiftapps.com"
+  clusterName: "rosa-v99n5"
   bundleConfigMap: "spire-bundle"

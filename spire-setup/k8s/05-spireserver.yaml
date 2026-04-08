@@ -1,18 +1,12 @@
 # SPIRE Server Configuration
-# Update jwtIssuer to match your OIDC Discovery Provider route URL
 apiVersion: operator.openshift.io/v1alpha1
 kind: SpireServer
 metadata:
   name: cluster
 spec:
-  # Logging
   logLevel: "info"
   logFormat: "text"
-  
-  # IMPORTANT: Update this to match your OIDC Discovery Provider route
-  # This must match the SpireOIDCDiscoveryProvider jwtIssuer exactly
-  # Example: https://oidc-discovery.apps.rosa.my-cluster.xxxx.p3.openshiftapps.com
-  jwtIssuer: "https://oidc-discovery.apps.YOUR-CLUSTER-DOMAIN.com"
+  jwtIssuer: "https://oidc-discovery.apps.rosa.rosa-v99n5.8ie9.p3.openshiftapps.com"
   
   # Certificate validity periods
   caValidity: "24h"           # How long the CA certificate is valid

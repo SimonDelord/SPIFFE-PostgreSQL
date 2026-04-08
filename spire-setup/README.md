@@ -13,6 +13,7 @@ This guide explains how to install and configure **SPIRE** (SPIFFE Runtime Envir
 5. [Configuration Files Explained](#configuration-files-explained)
 6. [Verification](#verification)
 7. [Troubleshooting](#troubleshooting)
+8. [Making an Application SPIFFE-Enabled](#making-an-application-spiffe-enabled)
 
 ---
 
@@ -585,11 +586,217 @@ oc get spireoidcdiscoveryprovider cluster -o yaml | grep jwtIssuer
 
 ---
 
+## Making an Application SPIFFE-Enabled
+
+Once SPIRE is installed, you need to configure your application to receive SPIFFE identities. This is done through a **ClusterSPIFFEID** resource - you don't manually configure entries in the SPIRE Server.
+
+### Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Automatic Workload Registration                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   1. ClusterSPIFFEID (defines which pods get identities)                    │
+│   ┌─────────────────────────────────────────────────────────────────────┐   │
+│   │  spec:                                                              │   │
+│   │    spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/..."          │   │
+│   │    podSelector:                                                     │   │
+│   │      matchLabels:                                                   │   │
+│   │        spiffe.io/spiffe-id: "my-app"     ◄── Selector              │   │
+│   └─────────────────────────────────────────────────────────────────────┘   │
+│                              │                                               │
+│                              │ SPIRE Controller watches & auto-registers    │
+│                              ▼                                               │
+│   2. Pod with matching labels                                               │
+│   ┌─────────────────────────────────────────────────────────────────────┐   │
+│   │  labels:                                                            │   │
+│   │    spiffe.io/spiffe-id: "my-app"         ◄── Matches!              │   │
+│   │  volumes:                                                           │   │
+│   │    - csi:                                                           │   │
+│   │        driver: csi.spiffe.io             ◄── Mounts SPIRE socket   │   │
+│   └─────────────────────────────────────────────────────────────────────┘   │
+│                              │                                               │
+│                              ▼                                               │
+│   3. SPIRE Agent issues X.509-SVID automatically when pod starts           │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Step 1: Create a ClusterSPIFFEID
+
+Create a `ClusterSPIFFEID` resource that defines which pods should receive SPIFFE identities:
+
+```yaml
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: my-app-workload
+spec:
+  # Template for the SPIFFE ID
+  # Available variables: .TrustDomain, .PodMeta.Namespace, .PodSpec.ServiceAccountName
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}"
+  
+  # Match pods with this label
+  podSelector:
+    matchLabels:
+      spiffe.io/spiffe-id: "my-app"
+  
+  # Optional: Only in namespaces with this label
+  namespaceSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: my-project
+  
+  # Optional: DNS names to include in the certificate
+  dnsNameTemplates:
+    - "{{ .PodMeta.Name }}.{{ .PodMeta.Namespace }}.svc.cluster.local"
+  
+  # Certificate TTL (default: 1h)
+  ttl: "1h"
+```
+
+### Step 2: Label Your Namespace
+
+If using `namespaceSelector`, label your namespace:
+
+```bash
+oc label namespace my-namespace app.kubernetes.io/part-of=my-project
+```
+
+### Step 3: Configure Your Pod/Deployment
+
+Add the required labels and CSI volume to your deployment:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+  namespace: my-namespace
+spec:
+  template:
+    metadata:
+      labels:
+        app: my-app
+        # This label must match the ClusterSPIFFEID podSelector
+        spiffe.io/spiffe-id: "my-app"
+    spec:
+      # ServiceAccount name is used in the SPIFFE ID
+      serviceAccountName: my-app-sa
+      
+      containers:
+        - name: my-app
+          image: my-app:latest
+          env:
+            # Tell your app where to find the SPIRE socket
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: "unix:///spiffe-workload-api/spire-agent.sock"
+          volumeMounts:
+            # Mount the Workload API socket
+            - name: spiffe-workload-api
+              mountPath: /spiffe-workload-api
+              readOnly: true
+      
+      volumes:
+        # CSI volume that provides the SPIRE Workload API
+        - name: spiffe-workload-api
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+```
+
+### Step 4: Use the SVID in Your Application
+
+**Python Example:**
+
+```python
+from spiffe import WorkloadApiClient
+
+# Connect to the Workload API
+client = WorkloadApiClient("unix:///spiffe-workload-api/spire-agent.sock")
+
+# Fetch X.509-SVID
+x509_context = client.fetch_x509_context()
+svid = x509_context.default_svid
+
+# Access the certificate and key
+print(f"SPIFFE ID: {svid.spiffe_id}")
+print(f"Certificate: {svid.cert_chain}")
+print(f"Private Key: {svid.private_key}")
+```
+
+**Go Example:**
+
+```go
+import "github.com/spiffe/go-spiffe/v2/workloadapi"
+
+ctx := context.Background()
+client, _ := workloadapi.New(ctx, workloadapi.WithAddr("unix:///spiffe-workload-api/spire-agent.sock"))
+
+x509SVID, _ := client.FetchX509SVID(ctx)
+fmt.Printf("SPIFFE ID: %s\n", x509SVID.ID)
+```
+
+### Registration Flow Summary
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         How Registration Works                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  1. You create ClusterSPIFFEID                                              │
+│     └──► SPIRE Controller creates registration entry in SPIRE Server       │
+│                                                                              │
+│  2. Pod starts with matching labels + CSI volume                            │
+│     └──► CSI Driver mounts /spiffe-workload-api/spire-agent.sock           │
+│                                                                              │
+│  3. SPIRE Agent attests the workload                                        │
+│     └──► Checks: namespace, serviceaccount, labels                         │
+│     └──► Matches registration entry                                         │
+│                                                                              │
+│  4. SPIRE Agent issues X.509-SVID                                           │
+│     └──► Available via Workload API socket                                  │
+│     └──► Auto-rotates before expiry                                         │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Verification Commands
+
+```bash
+# Check ClusterSPIFFEID was created
+oc get clusterspiffeids
+
+# See details of your registration
+oc describe clusterspiffeid my-app-workload
+
+# Check if pod has the SPIFFE socket mounted
+oc exec my-pod -- ls -la /spiffe-workload-api/
+
+# From inside the pod, check identity (if you have the spiffe-helper)
+oc exec my-pod -- cat /spiffe-workload-api/svid.pem
+```
+
+### Checklist: Making an App SPIFFE-Enabled
+
+| Step | Action | Verification |
+|------|--------|--------------|
+| ✅ | Create `ClusterSPIFFEID` | `oc get clusterspiffeids` |
+| ✅ | Label namespace (if using namespaceSelector) | `oc get ns -l app.kubernetes.io/part-of=...` |
+| ✅ | Add `spiffe.io/spiffe-id` label to pod | `oc get pod -l spiffe.io/spiffe-id=...` |
+| ✅ | Set `serviceAccountName` in pod spec | - |
+| ✅ | Add CSI volume (`csi.spiffe.io`) | `oc describe pod ... \| grep csi.spiffe.io` |
+| ✅ | Mount volume at `/spiffe-workload-api` | `oc exec pod -- ls /spiffe-workload-api/` |
+| ✅ | Set `SPIFFE_ENDPOINT_SOCKET` env var | - |
+| ✅ | Use Workload API in application code | Test with `/api/identity` endpoint |
+
+---
+
 ## Next Steps
 
 After SPIRE is installed:
 
-1. **Create a ClusterSPIFFEID** to register your workloads
+1. **Create a ClusterSPIFFEID** to register your workloads (see above)
 2. **Deploy your application** with the SPIFFE CSI volume
 3. **Use the SVID** for authentication (X.509 or JWT)
 
