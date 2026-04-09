@@ -17,7 +17,9 @@ This demo shows how a **SPIFFE-enabled application** uses its **X.509-SVID** (ce
 9. [Troubleshooting](#troubleshooting)
 10. [Key Learnings](#key-learnings)
 
-**See also:** [SPIRE Setup Guide](spire-setup/README.md) - How to install and configure SPIRE via the Zero Trust Workload Identity Manager Operator.
+**See also:**
+- [SPIRE Setup Guide](spire-setup/README.md) - How to install and configure SPIRE via the Zero Trust Workload Identity Manager Operator.
+- [Certificate Rotation Use Case](certificate-rotation-use-case/README.md) - How to configure SPIRE as an intermediate CA to solve CA rotation challenges.
 
 ---
 
