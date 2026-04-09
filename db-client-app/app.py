@@ -188,32 +188,42 @@ HTML_TEMPLATE = '''
         <h2>📊 Authentication Flow</h2>
         <div class="flow-diagram">
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│  This App       │     │  SPIRE Agent    │     │  EDB PostgreSQL │
+│  This App       │     │  SPIRE Agent    │     │    PostgreSQL   │
 │  (db-client)    │     │                 │     │                 │
 └────────┬────────┘     └────────┬────────┘     └────────┬────────┘
          │                       │                       │
          │  1. Request X.509-SVID                        │
          │ ─────────────────────►│                       │
          │                       │                       │
-         │  2. Return Certificate                        │
+         │  2. Return Certificate (with SAN URI)         │
          │ ◄─────────────────────│                       │
+         │    spiffe://trust-domain/ns/.../sa/...        │
          │                       │                       │
-         │  3. TLS Handshake with Client Cert            │
+         │  3. TLS + Connect(user="app_readonly",        │
+         │     sslcert=svid.pem, sslkey=key.pem)         │
          │ ─────────────────────────────────────────────►│
          │                       │                       │
          │                       │    4. Verify cert     │
          │                       │       signed by       │
-         │                       │       SPIRE CA        │
+         │                       │       SPIRE CA ✓      │
          │                       │                       │
-         │                       │    5. Extract CN      │
-         │                       │       "db-client-app" │
+         │                       │    5. pg_hba.conf:    │
+         │                       │       clientcert=     │
+         │                       │       verify-ca ✓     │
          │                       │                       │
-         │                       │    6. Map to role     │
-         │                       │       via pg_ident    │
+         │                       │    6. Trust user      │
+         │                       │       "app_readonly"  │
+         │                       │       from conn string│
          │                       │                       │
          │  7. Connection established as "app_readonly"  │
          │ ◄─────────────────────────────────────────────│
          │                       │                       │
+        </div>
+        <div class="info-box">
+            <strong>Note:</strong> SPIFFE certificates don't have a CN (Common Name). 
+            Identity is in the SAN (Subject Alternative Name) as a URI. 
+            PostgreSQL verifies the cert is signed by SPIRE CA, then trusts the 
+            username provided in the connection string.
         </div>
     </div>
 
