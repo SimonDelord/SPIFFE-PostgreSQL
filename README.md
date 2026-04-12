@@ -20,6 +20,7 @@ This demo shows how a **SPIFFE-enabled application** uses its **X.509-SVID** (ce
 **See also:**
 - [SPIRE Setup Guide](spire-setup/README.md) - How to install and configure SPIRE via the Zero Trust Workload Identity Manager Operator.
 - [Certificate Rotation Use Case](certificate-rotation-use-case/README.md) - How to configure SPIRE as an intermediate CA to solve CA rotation challenges.
+- [JWT-SVID Authentication with Enterprise IdP](SPIFFE%20SVID%20JWT%20Authentication%20with%20PostgreSQL/README.md) - How SPIFFE-enabled workloads can authenticate to OIDC-only services via Workload Identity Federation (Entra ID, AWS, GCP).
 
 ---
 
