@@ -1,0 +1,13 @@
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: jwt-exchange-client
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}"
+  podSelector:
+    matchLabels:
+      spiffe.io/spiffe-id: "jwt-exchange-client"
+  namespaceSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: spiffe-demo
+  ttl: "1h"

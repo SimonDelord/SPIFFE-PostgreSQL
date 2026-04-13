@@ -1,0 +1,113 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jwt-exchange-client
+  namespace: spiffe-jwt-demo
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jwt-exchange-client-config
+  namespace: spiffe-jwt-demo
+data:
+  KEYCLOAK_URL: "https://keycloak-keycloak.apps.rosa.rosa-v99n5.8ie9.p3.openshiftapps.com"
+  KEYCLOAK_REALM: "spiffe-demo"
+  KEYCLOAK_CLIENT_ID: "spiffe-workload"
+  KEYCLOAK_CLIENT_SECRET: "spiffe-workload-secret"
+  SPIRE_IDP_ALIAS: "spire-oidc"
+  API_SERVER_URL: "http://api-server.spiffe-jwt-demo.svc.cluster.local:8080"
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: jwt-exchange-client
+  namespace: spiffe-jwt-demo
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: jwt-exchange-client
+  namespace: spiffe-jwt-demo
+spec:
+  source:
+    type: Binary
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Dockerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: jwt-exchange-client:latest
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jwt-exchange-client
+  namespace: spiffe-jwt-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jwt-exchange-client
+  template:
+    metadata:
+      labels:
+        app: jwt-exchange-client
+        spiffe.io/spiffe-id: "jwt-exchange-client"
+    spec:
+      serviceAccountName: jwt-exchange-client
+      containers:
+        - name: client
+          image: image-registry.openshift-image-registry.svc:5000/spiffe-jwt-demo/jwt-exchange-client:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: "unix:///spiffe-workload-api/spire-agent.sock"
+          envFrom:
+            - configMapRef:
+                name: jwt-exchange-client-config
+          volumeMounts:
+            - name: spiffe-workload-api
+              mountPath: /spiffe-workload-api
+              readOnly: true
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+      volumes:
+        - name: spiffe-workload-api
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jwt-exchange-client
+  namespace: spiffe-jwt-demo
+spec:
+  selector:
+    app: jwt-exchange-client
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: jwt-exchange-client
+  namespace: spiffe-jwt-demo
+spec:
+  to:
+    kind: Service
+    name: jwt-exchange-client
+  port:
+    targetPort: 8080
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

@@ -1,0 +1,96 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: api-server
+  namespace: spiffe-jwt-demo
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-server-config
+  namespace: spiffe-jwt-demo
+data:
+  KEYCLOAK_URL: "https://keycloak-keycloak.apps.rosa.rosa-v99n5.8ie9.p3.openshiftapps.com"
+  KEYCLOAK_REALM: "spiffe-demo"
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: api-server
+  namespace: spiffe-jwt-demo
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: api-server
+  namespace: spiffe-jwt-demo
+spec:
+  source:
+    type: Binary
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Dockerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: api-server:latest
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-server
+  namespace: spiffe-jwt-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api-server
+  template:
+    metadata:
+      labels:
+        app: api-server
+    spec:
+      serviceAccountName: api-server
+      containers:
+        - name: api
+          image: image-registry.openshift-image-registry.svc:5000/spiffe-jwt-demo/api-server:latest
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: api-server-config
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-server
+  namespace: spiffe-jwt-demo
+spec:
+  selector:
+    app: api-server
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: api-server
+  namespace: spiffe-jwt-demo
+spec:
+  to:
+    kind: Service
+    name: api-server
+  port:
+    targetPort: 8080
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

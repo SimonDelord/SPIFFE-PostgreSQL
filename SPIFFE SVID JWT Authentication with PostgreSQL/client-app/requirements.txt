@@ -1,0 +1,5 @@
+Flask==2.3.3
+requests==2.31.0
+spiffe==0.2.6
+cryptography>=41.0.0
+urllib3>=2.0.0
