@@ -13,8 +13,11 @@ data:
   # Azure Entra ID configuration - UPDATE THESE VALUES
   AZURE_TENANT_ID: "YOUR_TENANT_ID"
   AZURE_CLIENT_ID: "YOUR_CLIENT_ID"
-  # API Server URL
-  API_SERVER_URL: "http://api-server:8080"
+  # PostgreSQL configuration
+  DB_HOST: "postgresql"
+  DB_PORT: "5432"
+  DB_NAME: "demo"
+  DB_USER: "spiffe-client"
 ---
 apiVersion: image.openshift.io/v1
 kind: ImageStream

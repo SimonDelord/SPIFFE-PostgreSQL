@@ -1,20 +1,21 @@
 """
-SPIFFE-enabled Client App that exchanges JWT-SVID for Entra ID token.
+SPIFFE-enabled Client App that:
+1. Gets JWT-SVID from SPIRE
+2. Exchanges JWT-SVID for Entra ID token via Workload Identity Federation
+3. Connects to PostgreSQL 18 using the Entra ID token for authentication
 
-Flow:
-1. Get JWT-SVID from SPIRE Agent
-2. Exchange JWT-SVID for Entra ID access token via Workload Identity Federation
-3. Call the API Server with the Entra ID token
+This demonstrates the full flow: SPIFFE → Entra ID → PostgreSQL 18 (OIDC)
 """
 
 import os
 import json
 import logging
-import time
 from datetime import datetime
 
-from flask import Flask, render_template_string, jsonify, request
+from flask import Flask, render_template_string, jsonify
 import requests
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from spiffe import WorkloadApiClient
 
 app = Flask(__name__)
@@ -32,15 +33,18 @@ AZURE_TENANT_ID = os.environ.get('AZURE_TENANT_ID', '')
 AZURE_CLIENT_ID = os.environ.get('AZURE_CLIENT_ID', '')
 AZURE_TOKEN_ENDPOINT = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/oauth2/v2.0/token" if AZURE_TENANT_ID else ''
 
-# API Server URL
-API_SERVER_URL = os.environ.get('API_SERVER_URL', 'http://api-server:8080')
+# PostgreSQL configuration
+DB_HOST = os.environ.get('DB_HOST', 'postgresql')
+DB_PORT = os.environ.get('DB_PORT', '5432')
+DB_NAME = os.environ.get('DB_NAME', 'demo')
+DB_USER = os.environ.get('DB_USER', 'spiffe-client')  # Entra ID app name
 
 # HTML template for the UI
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>SPIFFE to Entra ID - Client App</title>
+    <title>SPIFFE → Entra ID → PostgreSQL 18 Demo</title>
     <style>
         body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
         .container { max-width: 1200px; margin: 0 auto; }
@@ -51,70 +55,74 @@ HTML_TEMPLATE = '''
         .step-num { font-weight: bold; color: #0078d4; }
         button { background: #0078d4; color: white; border: none; padding: 12px 24px; border-radius: 4px; cursor: pointer; margin: 5px; font-size: 14px; }
         button:hover { background: #106ebe; }
-        button:disabled { background: #ccc; cursor: not-allowed; }
-        .success { background: #d4edda; border-color: #28a745; color: #155724; }
-        .error { background: #f8d7da; border-color: #dc3545; color: #721c24; }
+        .success { background: #d4edda; border-color: #28a745; color: #155724; padding: 10px; border-radius: 4px; }
+        .error { background: #f8d7da; border-color: #dc3545; color: #721c24; padding: 10px; border-radius: 4px; }
         pre { background: #2d2d2d; color: #f8f8f2; padding: 15px; border-radius: 4px; overflow-x: auto; font-size: 12px; }
-        .status { padding: 10px; border-radius: 4px; margin: 10px 0; }
-        .config-table { width: 100%; border-collapse: collapse; }
-        .config-table td { padding: 8px; border-bottom: 1px solid #eee; }
-        .config-table td:first-child { font-weight: bold; width: 200px; }
-        .diagram { background: #f8f9fa; padding: 20px; border-radius: 4px; font-family: monospace; white-space: pre; overflow-x: auto; }
+        .diagram { background: #f8f9fa; padding: 20px; border-radius: 4px; font-family: monospace; white-space: pre; overflow-x: auto; font-size: 11px; }
+        table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+        th, td { padding: 10px; border: 1px solid #ddd; text-align: left; }
+        th { background: #f0f0f0; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🔐 SPIFFE to Entra ID Token Exchange Demo</h1>
+        <h1>🔐 SPIFFE → Entra ID → PostgreSQL 18 Demo</h1>
         
         <div class="card">
             <h2>Architecture</h2>
             <div class="diagram">
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                     WORKLOAD IDENTITY FEDERATION FLOW                           │
-├─────────────────────────────────────────────────────────────────────────────────┤
-│                                                                                 │
-│  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌────────────┐ │
-│  │   SPIFFE     │     │   Entra ID   │     │  API Server  │     │ PostgreSQL │ │
-│  │   Client     │     │  (Azure AD)  │     │              │     │            │ │
-│  └──────┬───────┘     └──────┬───────┘     └──────┬───────┘     └──────┬─────┘ │
-│         │                    │                    │                    │       │
-│    1.   │ Get JWT-SVID       │                    │                    │       │
-│         │ from SPIRE         │                    │                    │       │
-│         │◄───────────────────│                    │                    │       │
-│         │                    │                    │                    │       │
-│    2.   │ Exchange JWT-SVID  │                    │                    │       │
-│         │ for Entra ID token │                    │                    │       │
-│         │───────────────────►│                    │                    │       │
-│         │                    │                    │                    │       │
-│    3.   │◄───────────────────│ Return Entra ID   │                    │       │
-│         │    access token    │ access token       │                    │       │
-│         │                    │                    │                    │       │
-│    4.   │ Call API with      │                    │                    │       │
-│         │ Entra ID token     │                    │                    │       │
-│         │────────────────────────────────────────►│                    │       │
-│         │                    │                    │                    │       │
-│    5.   │                    │                    │ Validate token     │       │
-│         │                    │◄───────────────────│ against Entra ID   │       │
-│         │                    │    JWKS/OIDC       │                    │       │
-│         │                    │───────────────────►│                    │       │
-│         │                    │                    │                    │       │
-│    6.   │                    │                    │ Query database     │       │
-│         │                    │                    │───────────────────►│       │
-│         │                    │                    │◄───────────────────│       │
-│         │                    │                    │                    │       │
-│    7.   │◄────────────────────────────────────────│ Return data        │       │
-│         │                    │                    │                    │       │
-└─────────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                      SPIFFE → ENTRA ID → POSTGRESQL 18 (ON OPENSHIFT)                   │
+├─────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                         │
+│  ┌──────────────┐     ┌─────────────────────────────┐     ┌──────────────┐             │
+│  │              │     │        SPIRE Server         │     │              │             │
+│  │   SPIFFE     │     │  ┌───────────────────────┐  │     │   Entra ID   │             │
+│  │   Client     │     │  │  SPIRE OIDC Discovery │  │     │  (Azure AD)  │             │
+│  │   (this app) │     │  │  Provider             │  │     │              │             │
+│  │              │     │  │  (/.well-known, /keys)│  │     │              │             │
+│  └──────┬───────┘     │  └───────────┬───────────┘  │     └──────┬───────┘             │
+│         │             └──────────────┼──────────────┘            │                     │
+│         │                            │                           │  ┌───────────────┐  │
+│         │                            │                           │  │ PostgreSQL 18 │  │
+│         │                            │                           │  │ (OpenShift)   │  │
+│         │                            │                           │  │ + pg_oidc_    │  │
+│         │                            │                           │  │   validator   │  │
+│         │                            │                           │  └───────┬───────┘  │
+│         │                            │                           │          │          │
+│    1-2. │ Get JWT-SVID ─────────────►│                           │          │          │
+│         │◄───────────────────────────│                           │          │          │
+│         │                            │                           │          │          │
+│    3.   │ Exchange JWT-SVID ─────────────────────────────────────►          │          │
+│         │                            │                           │          │          │
+│    4.   │                            │◄──────────────────────────│ Validate │          │
+│         │                            │  Fetch JWKS               │ JWT-SVID │          │
+│         │                            │──────────────────────────►│          │          │
+│         │                            │                           │          │          │
+│    5.   │◄───────────────────────────────────────────────────────│ Entra ID │          │
+│         │                Entra ID Access Token                   │ token    │          │
+│         │                            │                           │          │          │
+│    6.   │ Connect with Entra ID token ───────────────────────────────────────►         │
+│         │                            │                           │          │          │
+│    7.   │                            │                           │◄─────────│ Validate │
+│         │                            │                           │  Entra   │ token    │
+│         │                            │                           │  JWKS    │          │
+│         │                            │                           │─────────►│          │
+│         │                            │                           │          │          │
+│    8.   │◄────────────────────────────────────────────────────────────────────         │
+│         │                       Query results                    │          │          │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
             </div>
         </div>
         
         <div class="card">
             <h2>Configuration</h2>
-            <table class="config-table">
+            <table>
+                <tr><th>Setting</th><th>Value</th></tr>
                 <tr><td>SPIFFE Endpoint</td><td>{{ spiffe_endpoint }}</td></tr>
                 <tr><td>Azure Tenant ID</td><td>{{ azure_tenant_id }}</td></tr>
                 <tr><td>Azure Client ID</td><td>{{ azure_client_id }}</td></tr>
-                <tr><td>API Server URL</td><td>{{ api_server_url }}</td></tr>
+                <tr><td>PostgreSQL Host</td><td>{{ db_host }}</td></tr>
                 <tr><td>Entra ID Configured</td><td>{{ entra_configured }}</td></tr>
             </table>
         </div>
@@ -123,21 +131,21 @@ HTML_TEMPLATE = '''
             <h2>Demo Steps</h2>
             
             <div class="step">
-                <span class="step-num">Step 1:</span> Get JWT-SVID from SPIRE
+                <span class="step-num">Step 1-2:</span> Get JWT-SVID from SPIRE
                 <br><button onclick="getJwtSvid()">Get JWT-SVID</button>
                 <div id="jwt-svid-result"></div>
             </div>
             
             <div class="step">
-                <span class="step-num">Step 2:</span> Exchange JWT-SVID for Entra ID Token
-                <br><button onclick="exchangeToken()" id="exchange-btn" disabled>Exchange for Entra ID Token</button>
+                <span class="step-num">Step 3-5:</span> Exchange JWT-SVID for Entra ID Token
+                <br><button onclick="exchangeToken()" id="exchange-btn">Exchange for Entra ID Token</button>
                 <div id="exchange-result"></div>
             </div>
             
             <div class="step">
-                <span class="step-num">Step 3:</span> Call API Server with Entra ID Token
-                <br><button onclick="callApi()" id="api-btn" disabled>Get Products from API</button>
-                <div id="api-result"></div>
+                <span class="step-num">Step 6-8:</span> Connect to PostgreSQL 18 with Entra ID Token
+                <br><button onclick="queryDatabase()" id="db-btn">Query PostgreSQL</button>
+                <div id="db-result"></div>
             </div>
             
             <div class="step">
@@ -149,9 +157,6 @@ HTML_TEMPLATE = '''
     </div>
     
     <script>
-        let currentJwtSvid = null;
-        let currentEntraToken = null;
-        
         async function getJwtSvid() {
             const resultDiv = document.getElementById('jwt-svid-result');
             resultDiv.innerHTML = '<div class="status">Fetching JWT-SVID from SPIRE...</div>';
@@ -159,22 +164,14 @@ HTML_TEMPLATE = '''
             try {
                 const response = await fetch('/api/jwt-svid');
                 const data = await response.json();
-                
-                if (data.status === 'success') {
-                    currentJwtSvid = data.token;
-                    document.getElementById('exchange-btn').disabled = false;
-                    resultDiv.innerHTML = `
-                        <div class="status success">✓ JWT-SVID obtained successfully!</div>
-                        <pre>${JSON.stringify(data, null, 2)}</pre>
-                    `;
-                } else {
-                    resultDiv.innerHTML = `
-                        <div class="status error">✗ Failed to get JWT-SVID</div>
-                        <pre>${JSON.stringify(data, null, 2)}</pre>
-                    `;
-                }
+                resultDiv.innerHTML = `
+                    <div class="${data.status === 'success' ? 'success' : 'error'}">
+                        ${data.status === 'success' ? '✓' : '✗'} ${data.status}
+                    </div>
+                    <pre>${JSON.stringify(data, null, 2)}</pre>
+                `;
             } catch (e) {
-                resultDiv.innerHTML = `<div class="status error">✗ Error: ${e.message}</div>`;
+                resultDiv.innerHTML = `<div class="error">✗ Error: ${e.message}</div>`;
             }
         }
         
@@ -183,59 +180,34 @@ HTML_TEMPLATE = '''
             resultDiv.innerHTML = '<div class="status">Exchanging JWT-SVID for Entra ID token...</div>';
             
             try {
-                const response = await fetch('/api/exchange-token', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({jwt_svid: currentJwtSvid})
-                });
+                const response = await fetch('/api/exchange-token');
                 const data = await response.json();
-                
-                if (data.status === 'success') {
-                    currentEntraToken = data.access_token;
-                    document.getElementById('api-btn').disabled = false;
-                    resultDiv.innerHTML = `
-                        <div class="status success">✓ Entra ID token obtained!</div>
-                        <pre>${JSON.stringify(data, null, 2)}</pre>
-                    `;
-                } else {
-                    resultDiv.innerHTML = `
-                        <div class="status error">✗ Token exchange failed</div>
-                        <pre>${JSON.stringify(data, null, 2)}</pre>
-                    `;
-                }
+                resultDiv.innerHTML = `
+                    <div class="${data.status === 'success' ? 'success' : 'error'}">
+                        ${data.status === 'success' ? '✓' : '✗'} ${data.status}
+                    </div>
+                    <pre>${JSON.stringify(data, null, 2)}</pre>
+                `;
             } catch (e) {
-                resultDiv.innerHTML = `<div class="status error">✗ Error: ${e.message}</div>`;
+                resultDiv.innerHTML = `<div class="error">✗ Error: ${e.message}</div>`;
             }
         }
         
-        async function callApi() {
-            const resultDiv = document.getElementById('api-result');
-            resultDiv.innerHTML = '<div class="status">Calling API Server with Entra ID token...</div>';
+        async function queryDatabase() {
+            const resultDiv = document.getElementById('db-result');
+            resultDiv.innerHTML = '<div class="status">Connecting to PostgreSQL 18 with Entra ID token...</div>';
             
             try {
-                const response = await fetch('/api/call-api', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        entra_token: currentEntraToken,
-                        endpoint: '/api/products'
-                    })
-                });
+                const response = await fetch('/api/query-database');
                 const data = await response.json();
-                
-                if (data.status === 'success') {
-                    resultDiv.innerHTML = `
-                        <div class="status success">✓ API call successful!</div>
-                        <pre>${JSON.stringify(data, null, 2)}</pre>
-                    `;
-                } else {
-                    resultDiv.innerHTML = `
-                        <div class="status error">✗ API call failed</div>
-                        <pre>${JSON.stringify(data, null, 2)}</pre>
-                    `;
-                }
+                resultDiv.innerHTML = `
+                    <div class="${data.status === 'success' ? 'success' : 'error'}">
+                        ${data.status === 'success' ? '✓' : '✗'} ${data.status}
+                    </div>
+                    <pre>${JSON.stringify(data, null, 2)}</pre>
+                `;
             } catch (e) {
-                resultDiv.innerHTML = `<div class="status error">✗ Error: ${e.message}</div>`;
+                resultDiv.innerHTML = `<div class="error">✗ Error: ${e.message}</div>`;
             }
         }
         
@@ -246,15 +218,14 @@ HTML_TEMPLATE = '''
             try {
                 const response = await fetch('/api/full-demo');
                 const data = await response.json();
-                
                 resultDiv.innerHTML = `
-                    <div class="status ${data.overall_status === 'success' ? 'success' : 'error'}">
+                    <div class="${data.overall_status === 'success' ? 'success' : 'error'}">
                         ${data.overall_status === 'success' ? '✓' : '✗'} Full Demo ${data.overall_status}
                     </div>
                     <pre>${JSON.stringify(data, null, 2)}</pre>
                 `;
             } catch (e) {
-                resultDiv.innerHTML = `<div class="status error">✗ Error: ${e.message}</div>`;
+                resultDiv.innerHTML = `<div class="error">✗ Error: ${e.message}</div>`;
             }
         }
     </script>
@@ -263,12 +234,11 @@ HTML_TEMPLATE = '''
 '''
 
 
-def get_jwt_svid(audience=None):
+def get_jwt_svid():
     """Fetch a JWT-SVID from SPIRE."""
     try:
         client = WorkloadApiClient(SPIFFE_ENDPOINT_SOCKET)
-        if audience is None:
-            audience = AZURE_CLIENT_ID or "api://default"
+        audience = AZURE_CLIENT_ID or "api://default"
         
         jwt_svid = client.fetch_jwt_svid(audience={audience})
         return {
@@ -285,12 +255,9 @@ def get_jwt_svid(audience=None):
         }
 
 
-def exchange_jwt_svid_for_entra_token(jwt_svid):
+def exchange_jwt_svid_for_entra_token(jwt_svid_token):
     """
     Exchange a JWT-SVID for an Entra ID access token using Workload Identity Federation.
-    
-    This uses the client_credentials grant with client_assertion.
-    The JWT-SVID serves as the client_assertion proving the workload's identity.
     """
     if not AZURE_TENANT_ID or not AZURE_CLIENT_ID:
         return {
@@ -299,19 +266,19 @@ def exchange_jwt_svid_for_entra_token(jwt_svid):
         }
     
     try:
-        # Token exchange request using federated credentials
         data = {
             'grant_type': 'client_credentials',
             'client_id': AZURE_CLIENT_ID,
             'client_assertion_type': 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
-            'client_assertion': jwt_svid,
+            'client_assertion': jwt_svid_token,
             'scope': f'{AZURE_CLIENT_ID}/.default'
         }
         
         response = requests.post(
             AZURE_TOKEN_ENDPOINT,
             data=data,
-            headers={'Content-Type': 'application/x-www-form-urlencoded'}
+            headers={'Content-Type': 'application/x-www-form-urlencoded'},
+            timeout=30
         )
         
         if response.status_code == 200:
@@ -337,24 +304,58 @@ def exchange_jwt_svid_for_entra_token(jwt_svid):
         }
 
 
-def call_api_with_token(token, endpoint='/api/products'):
-    """Call the API Server with an Entra ID token."""
+def query_database_with_token(entra_token):
+    """
+    Connect to PostgreSQL 18 using the Entra ID token and query data.
+    
+    PostgreSQL 18 with pg_oidc_validator validates the token against Entra ID.
+    """
     try:
-        response = requests.get(
-            f"{API_SERVER_URL}{endpoint}",
-            headers={'Authorization': f'Bearer {token}'},
-            timeout=10
+        # Connect to PostgreSQL using the Entra ID token as the password
+        conn = psycopg2.connect(
+            host=DB_HOST,
+            port=DB_PORT,
+            database=DB_NAME,
+            user=DB_USER,
+            password=entra_token,
+            sslmode='prefer',
+            connect_timeout=10
         )
         
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Query products
+        cursor.execute('SELECT * FROM products ORDER BY id')
+        products = cursor.fetchall()
+        
+        # Log the access
+        cursor.execute(
+            "INSERT INTO access_log (subject, issuer, action) VALUES (%s, %s, %s)",
+            (DB_USER, 'entra-id', 'SELECT products')
+        )
+        conn.commit()
+        
+        cursor.close()
+        conn.close()
+        
         return {
-            'status': 'success' if response.status_code == 200 else 'error',
-            'status_code': response.status_code,
-            'data': response.json() if response.headers.get('content-type', '').startswith('application/json') else response.text
+            'status': 'success',
+            'message': 'Successfully connected to PostgreSQL 18 with Entra ID token!',
+            'authentication_method': 'OIDC (pg_oidc_validator)',
+            'products': [dict(p) for p in products],
+            'product_count': len(products)
+        }
+        
+    except psycopg2.OperationalError as e:
+        return {
+            'status': 'error',
+            'error': f'PostgreSQL connection failed: {str(e)}',
+            'hint': 'Ensure PostgreSQL 18 is configured with pg_oidc_validator and Entra ID settings'
         }
     except Exception as e:
         return {
             'status': 'error',
-            'error': f'API call error: {str(e)}'
+            'error': f'Database error: {str(e)}'
         }
 
 
@@ -366,7 +367,7 @@ def index():
         spiffe_endpoint=SPIFFE_ENDPOINT_SOCKET,
         azure_tenant_id=AZURE_TENANT_ID[:8] + '...' if AZURE_TENANT_ID else 'Not configured',
         azure_client_id=AZURE_CLIENT_ID[:8] + '...' if AZURE_CLIENT_ID else 'Not configured',
-        api_server_url=API_SERVER_URL,
+        db_host=f"{DB_HOST}:{DB_PORT}/{DB_NAME}",
         entra_configured='Yes ✓' if (AZURE_TENANT_ID and AZURE_CLIENT_ID) else 'No ✗'
     )
 
@@ -377,36 +378,41 @@ def api_get_jwt_svid():
     return jsonify(get_jwt_svid())
 
 
-@app.route('/api/exchange-token', methods=['POST'])
+@app.route('/api/exchange-token')
 def api_exchange_token():
     """API endpoint to exchange JWT-SVID for Entra ID token."""
-    data = request.get_json() or {}
-    jwt_svid = data.get('jwt_svid')
+    # First get the JWT-SVID
+    svid_result = get_jwt_svid()
+    if svid_result['status'] != 'success':
+        return jsonify(svid_result)
     
-    if not jwt_svid:
-        # Get a fresh JWT-SVID if not provided
-        svid_result = get_jwt_svid()
-        if svid_result['status'] != 'success':
-            return jsonify(svid_result)
-        jwt_svid = svid_result['token']
-    
-    return jsonify(exchange_jwt_svid_for_entra_token(jwt_svid))
+    # Exchange for Entra ID token
+    return jsonify(exchange_jwt_svid_for_entra_token(svid_result['token']))
 
 
-@app.route('/api/call-api', methods=['POST'])
-def api_call_api():
-    """API endpoint to call the API Server."""
-    data = request.get_json() or {}
-    entra_token = data.get('entra_token')
-    endpoint = data.get('endpoint', '/api/products')
-    
-    if not entra_token:
+@app.route('/api/query-database')
+def api_query_database():
+    """API endpoint to query PostgreSQL with Entra ID token."""
+    # Get JWT-SVID
+    svid_result = get_jwt_svid()
+    if svid_result['status'] != 'success':
         return jsonify({
             'status': 'error',
-            'error': 'No Entra ID token provided'
+            'step': 'Get JWT-SVID',
+            'error': svid_result.get('error')
         })
     
-    return jsonify(call_api_with_token(entra_token, endpoint))
+    # Exchange for Entra ID token
+    exchange_result = exchange_jwt_svid_for_entra_token(svid_result['token'])
+    if exchange_result['status'] != 'success':
+        return jsonify({
+            'status': 'error',
+            'step': 'Exchange Token',
+            'error': exchange_result.get('error')
+        })
+    
+    # Query database
+    return jsonify(query_database_with_token(exchange_result['access_token']))
 
 
 @app.route('/api/full-demo')
@@ -417,46 +423,66 @@ def api_full_demo():
         'steps': []
     }
     
-    # Step 1: Get JWT-SVID
+    # Step 1-2: Get JWT-SVID
     step1 = get_jwt_svid()
     results['steps'].append({
-        'step': 1,
+        'step': '1-2',
         'name': 'Get JWT-SVID from SPIRE',
-        'result': step1
+        'result': {
+            'status': step1['status'],
+            'spiffe_id': step1.get('spiffe_id'),
+            'audience': step1.get('audience'),
+            'token_preview': step1.get('token_preview'),
+            'error': step1.get('error')
+        }
     })
     
     if step1['status'] != 'success':
         results['overall_status'] = 'failed'
-        results['failed_at'] = 'Step 1: Get JWT-SVID'
+        results['failed_at'] = 'Step 1-2: Get JWT-SVID'
         return jsonify(results)
     
-    # Step 2: Exchange for Entra ID token
+    # Step 3-5: Exchange for Entra ID token
     step2 = exchange_jwt_svid_for_entra_token(step1['token'])
     results['steps'].append({
-        'step': 2,
+        'step': '3-5',
         'name': 'Exchange JWT-SVID for Entra ID token',
-        'result': step2
+        'result': {
+            'status': step2['status'],
+            'token_type': step2.get('token_type'),
+            'expires_in': step2.get('expires_in'),
+            'token_preview': step2.get('token_preview'),
+            'error': step2.get('error'),
+            'details': step2.get('details')
+        }
     })
     
     if step2['status'] != 'success':
         results['overall_status'] = 'failed'
-        results['failed_at'] = 'Step 2: Token Exchange'
+        results['failed_at'] = 'Step 3-5: Token Exchange'
         return jsonify(results)
     
-    # Step 3: Call API Server
-    step3 = call_api_with_token(step2['access_token'])
+    # Step 6-8: Connect to PostgreSQL
+    step3 = query_database_with_token(step2['access_token'])
     results['steps'].append({
-        'step': 3,
-        'name': 'Call API Server with Entra ID token',
+        'step': '6-8',
+        'name': 'Connect to PostgreSQL 18 with Entra ID token',
         'result': step3
     })
     
     if step3['status'] != 'success':
         results['overall_status'] = 'failed'
-        results['failed_at'] = 'Step 3: API Call'
+        results['failed_at'] = 'Step 6-8: PostgreSQL Connection'
         return jsonify(results)
     
     results['overall_status'] = 'success'
+    results['summary'] = {
+        'spiffe_id': step1.get('spiffe_id'),
+        'entra_token_expires_in': step2.get('expires_in'),
+        'products_retrieved': step3.get('product_count'),
+        'authentication_method': step3.get('authentication_method')
+    }
+    
     return jsonify(results)
 
 
@@ -471,9 +497,9 @@ def health():
 
 
 if __name__ == '__main__':
-    logger.info("Starting SPIFFE Client App")
+    logger.info("Starting SPIFFE → Entra ID → PostgreSQL 18 Client")
     logger.info(f"SPIFFE Endpoint: {SPIFFE_ENDPOINT_SOCKET}")
     logger.info(f"Entra ID configured: {bool(AZURE_TENANT_ID and AZURE_CLIENT_ID)}")
-    logger.info(f"API Server URL: {API_SERVER_URL}")
+    logger.info(f"PostgreSQL: {DB_HOST}:{DB_PORT}/{DB_NAME}")
     
     app.run(host='0.0.0.0', port=8080, debug=False)

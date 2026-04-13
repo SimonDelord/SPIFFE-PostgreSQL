@@ -1,12 +1,12 @@
-# SPIFFE JWT-SVID Authentication with PostgreSQL via Entra ID
+# SPIFFE JWT-SVID Authentication with PostgreSQL 18 via Entra ID
 
-This document describes how a **SPIFFE-enabled workload** can authenticate directly to **PostgreSQL** by leveraging **Workload Identity Federation** with **Microsoft Entra ID** (formerly Azure AD).
+This document describes how a **SPIFFE-enabled workload** can authenticate directly to **PostgreSQL 18** (running on OpenShift) by leveraging **Workload Identity Federation** with **Microsoft Entra ID** and PostgreSQL 18's native **OIDC authentication support**.
 
 ## Table of Contents
 
 - [Overview](#overview)
 - [The Problem](#the-problem)
-- [The Solution: Workload Identity Federation](#the-solution-workload-identity-federation)
+- [The Solution: Workload Identity Federation + PostgreSQL 18 OIDC](#the-solution-workload-identity-federation--postgresql-18-oidc)
 - [Architecture](#architecture)
 - [How It Works](#how-it-works)
 - [Prerequisites](#prerequisites)
@@ -17,12 +17,12 @@ This document describes how a **SPIFFE-enabled workload** can authenticate direc
 
 ## Overview
 
-In enterprise environments, organizations often use **Microsoft Entra ID** as their centralized Identity Provider. **Azure Database for PostgreSQL** supports native Entra ID authentication, allowing applications to connect using OIDC tokens instead of passwords.
+**PostgreSQL 18** introduced native **OAuth 2.0/OIDC authentication support**, allowing applications to connect using OIDC tokens instead of passwords. Combined with the **pg_oidc_validator** extension, PostgreSQL can validate tokens from identity providers like **Microsoft Entra ID**.
 
-This demo shows how **SPIFFE-enabled workloads** running on Kubernetes can authenticate to PostgreSQL by:
+This demo shows how **SPIFFE-enabled workloads** running on OpenShift can authenticate to PostgreSQL 18 by:
 1. Obtaining a **JWT-SVID** from SPIRE
 2. Exchanging it for an **Entra ID access token** via Workload Identity Federation
-3. Connecting directly to **PostgreSQL** using the Entra ID token
+3. Connecting directly to **PostgreSQL 18** (on OpenShift) using the Entra ID token
 
 ---
 
@@ -36,7 +36,7 @@ This demo shows how **SPIFFE-enabled workloads** running on Kubernetes can authe
 │   SPIFFE World                              Enterprise World                 │
 │   ┌─────────────────┐                       ┌─────────────────┐             │
 │   │                 │                       │                 │             │
-│   │   App A         │     ───────?──────►   │   PostgreSQL    │             │
+│   │   App A         │     ───────?──────►   │   PostgreSQL 18 │             │
 │   │  (SPIFFE        │     JWT-SVID          │  (Only accepts  │             │
 │   │   enabled)      │     not accepted!     │   Entra ID      │             │
 │   │                 │                       │   tokens)       │             │
@@ -50,15 +50,24 @@ This demo shows how **SPIFFE-enabled workloads** running on Kubernetes can authe
 ```
 
 **Challenges:**
-1. PostgreSQL doesn't understand JWT-SVIDs
+1. PostgreSQL doesn't understand JWT-SVIDs directly
 2. The enterprise security team requires all database access to go through Entra ID
 3. Need a way to bridge SPIFFE identity to Entra ID identity
 
 ---
 
-## The Solution: Workload Identity Federation
+## The Solution: Workload Identity Federation + PostgreSQL 18 OIDC
 
-**Workload Identity Federation** allows external identity providers (like SPIFFE/SPIRE) to exchange their tokens for Entra ID tokens. Entra ID validates the JWT-SVID by fetching the JWKS from the **SPIRE OIDC Discovery Provider**.
+**Workload Identity Federation** allows SPIFFE/SPIRE to exchange JWT-SVIDs for Entra ID tokens. **PostgreSQL 18** with the **pg_oidc_validator** extension can then validate these Entra ID tokens directly.
+
+### Key Components
+
+| Component | Role |
+|-----------|------|
+| **PostgreSQL 18** | Native OAuth 2.0 authentication support |
+| **pg_oidc_validator** | Extension that validates OIDC tokens against identity providers |
+| **Microsoft Entra ID** | Enterprise IdP that issues access tokens |
+| **SPIRE OIDC Discovery Provider** | Publishes JWKS for JWT-SVID validation |
 
 ---
 
@@ -66,7 +75,7 @@ This demo shows how **SPIFFE-enabled workloads** running on Kubernetes can authe
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────────────┐
-│                      SPIFFE → ENTRA ID → POSTGRESQL FLOW                                │
+│                      SPIFFE → ENTRA ID → POSTGRESQL 18 (ON OPENSHIFT)                   │
 ├─────────────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                         │
 │  ┌──────────────┐     ┌─────────────────────────────┐     ┌──────────────┐             │
@@ -78,142 +87,116 @@ This demo shows how **SPIFFE-enabled workloads** running on Kubernetes can authe
 │  └──────┬───────┘     │  └───────────┬───────────┘  │     └──────┬───────┘             │
 │         │             └──────────────┼──────────────┘            │                     │
 │         │                            │                           │                     │
-│         │                            │                           │      ┌────────────┐ │
-│         │                            │                           │      │ PostgreSQL │ │
-│         │                            │                           │      │ (Azure DB) │ │
-│         │                            │                           │      └──────┬─────┘ │
-│         │                            │                           │             │       │
-│    1.   │ Request JWT-SVID           │                           │             │       │
-│         │───────────────────────────►│                           │             │       │
-│         │                            │                           │             │       │
-│    2.   │◄───────────────────────────│ Issue JWT-SVID            │             │       │
-│         │       (signed JWT)         │                           │             │       │
-│         │                            │                           │             │       │
-│    3.   │ Exchange JWT-SVID for Entra ID token                   │             │       │
-│         │───────────────────────────────────────────────────────►│             │       │
-│         │            (Workload Identity Federation)              │             │       │
-│         │                            │                           │             │       │
-│    4.   │                            │◄──────────────────────────│             │       │
-│         │                            │  Fetch JWKS to validate   │             │       │
-│         │                            │  JWT-SVID signature       │             │       │
-│         │                            │──────────────────────────►│             │       │
-│         │                            │                           │             │       │
-│    5.   │◄───────────────────────────────────────────────────────│             │       │
-│         │              Entra ID Access Token                     │             │       │
-│         │                            │                           │             │       │
-│    6.   │ Connect to PostgreSQL with Entra ID token              │             │       │
-│         │────────────────────────────────────────────────────────────────────►│       │
-│         │                            │                           │             │       │
-│    7.   │                            │                           │◄────────────│       │
-│         │                            │                           │ Validate    │       │
-│         │                            │                           │ token via   │       │
-│         │                            │                           │ Entra JWKS  │       │
-│         │                            │                           │────────────►│       │
-│         │                            │                           │             │       │
-│    8.   │◄─────────────────────────────────────────────────────────────────────│       │
-│         │                            │        Return data        │             │       │
+│         │                            │                           │  ┌───────────────┐  │
+│         │                            │                           │  │ PostgreSQL 18 │  │
+│         │                            │                           │  │ (OpenShift)   │  │
+│         │                            │                           │  │ + pg_oidc_    │  │
+│         │                            │                           │  │   validator   │  │
+│         │                            │                           │  └───────┬───────┘  │
+│         │                            │                           │          │          │
+│    1.   │ Request JWT-SVID           │                           │          │          │
+│         │───────────────────────────►│                           │          │          │
+│         │                            │                           │          │          │
+│    2.   │◄───────────────────────────│ Issue JWT-SVID            │          │          │
+│         │       (signed JWT)         │                           │          │          │
+│         │                            │                           │          │          │
+│    3.   │ Exchange JWT-SVID for Entra ID token                   │          │          │
+│         │───────────────────────────────────────────────────────►│          │          │
+│         │            (Workload Identity Federation)              │          │          │
+│         │                            │                           │          │          │
+│    4.   │                            │◄──────────────────────────│          │          │
+│         │                            │  Fetch JWKS to validate   │          │          │
+│         │                            │  JWT-SVID signature       │          │          │
+│         │                            │──────────────────────────►│          │          │
+│         │                            │                           │          │          │
+│    5.   │◄───────────────────────────────────────────────────────│          │          │
+│         │              Entra ID Access Token                     │          │          │
+│         │                            │                           │          │          │
+│    6.   │ Connect to PostgreSQL with Entra ID token              │          │          │
+│         │────────────────────────────────────────────────────────────────────►         │
+│         │                            │                           │          │          │
+│    7.   │                            │                           │◄─────────│          │
+│         │                            │                           │ Validate │          │
+│         │                            │                           │ token via│          │
+│         │                            │                           │ Entra ID │          │
+│         │                            │                           │ JWKS     │          │
+│         │                            │                           │─────────►│          │
+│         │                            │                           │          │          │
+│    8.   │◄────────────────────────────────────────────────────────────────────         │
+│         │                       Query results                    │          │          │
 │                                                                                         │
 └─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Components
+### Flow Summary
 
-| Component | Role |
-|-----------|------|
-| **SPIRE Server** | Issues JWT-SVIDs to registered workloads |
-| **SPIRE OIDC Discovery Provider** | Exposes JWKS endpoint (`/keys`) for JWT-SVID validation |
-| **Microsoft Entra ID** | Validates JWT-SVIDs via OIDC Discovery Provider, issues access tokens |
-| **SPIFFE Client App** | Obtains JWT-SVID, exchanges for Entra ID token, connects to PostgreSQL |
-| **Azure Database for PostgreSQL** | Validates Entra ID tokens, serves database queries |
+| Step | From | To | Description |
+|------|------|-----|-------------|
+| 1-2 | Client | SPIRE Server | Client requests and receives JWT-SVID |
+| 3 | Client | Entra ID | Client exchanges JWT-SVID for Entra ID token |
+| 4 | Entra ID | SPIRE OIDC DP | Entra ID fetches JWKS to validate JWT-SVID |
+| 5 | Entra ID | Client | Entra ID issues access token |
+| 6 | Client | PostgreSQL 18 | Client connects using Entra ID token as password |
+| 7 | PostgreSQL | Entra ID | PostgreSQL validates token via pg_oidc_validator |
+| 8 | PostgreSQL | Client | Connection established, queries executed |
 
 ---
 
 ## How It Works
 
-### Step-by-Step Flow
+### Step 1-2: Client Obtains JWT-SVID from SPIRE
 
-#### Step 1: Client Requests JWT-SVID from SPIRE
+```python
+from spiffe import WorkloadApiClient
 
-```
-Client App ──────────────────────────────► SPIRE Agent
-            Request JWT-SVID
-            audience: "{azure-client-id}"
-```
+client = WorkloadApiClient("unix:///spiffe-workload-api/spire-agent.sock")
+jwt_svid = client.fetch_jwt_svid(audience={AZURE_CLIENT_ID})
 
-The SPIFFE-enabled client uses the Workload API to request a JWT-SVID with the Azure application's client ID as the audience.
-
-#### Step 2: SPIRE Issues JWT-SVID
-
-```
-Client App ◄────────────────────────────── SPIRE Agent
-            JWT-SVID:
-            {
-              "iss": "https://spire-oidc.example.com",
-              "sub": "spiffe://trust-domain/ns/app/sa/client",
-              "aud": "{azure-client-id}",
-              "exp": 1234567890,
-              "iat": 1234567800
-            }
+# JWT-SVID payload:
+# {
+#   "iss": "https://spire-oidc.example.com",
+#   "sub": "spiffe://trust-domain/ns/app/sa/client",
+#   "aud": "{azure-client-id}",
+#   "exp": 1234567890
+# }
 ```
 
-SPIRE signs the JWT-SVID with its private key. The public key is available via the OIDC Discovery Provider.
+### Step 3-5: Exchange JWT-SVID for Entra ID Token
 
-#### Step 3: Client Exchanges JWT-SVID for Entra ID Token
+```python
+import requests
 
-```
-Client App ──────────────────────────────► Entra ID
-            POST /oauth2/v2.0/token
-            
-            client_id={azure-app-registration-id}
-            client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer
-            client_assertion={JWT-SVID}
-            grant_type=client_credentials
-            scope=https://ossrdbms-aad.database.windows.net/.default
-```
+response = requests.post(
+    f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token",
+    data={
+        "client_id": AZURE_CLIENT_ID,
+        "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+        "client_assertion": jwt_svid.token,
+        "grant_type": "client_credentials",
+        "scope": f"{AZURE_CLIENT_ID}/.default"
+    }
+)
 
-The client sends the JWT-SVID to Entra ID's token endpoint using the `client_credentials` grant with `client_assertion`.
-
-#### Step 4: Entra ID Validates JWT-SVID
-
-```
-Entra ID ──────────────────────────────► SPIRE OIDC Discovery Provider
-          GET /.well-known/openid-configuration
-          GET /keys (JWKS)
-          
-Entra ID validates:
-  ✓ Signature (using SPIRE's public key from JWKS)
-  ✓ Issuer matches Federated Identity Credential
-  ✓ Subject (SPIFFE ID) matches allowed pattern
-  ✓ Audience matches expected value
-  ✓ Token is not expired
+entra_token = response.json()["access_token"]
 ```
 
-#### Step 5: Entra ID Issues Access Token
+### Step 6-8: Connect to PostgreSQL 18 with Entra ID Token
 
-```
-Client App ◄────────────────────────────── Entra ID
-            {
-              "access_token": "eyJ0eXAiOiJKV1...",
-              "token_type": "Bearer",
-              "expires_in": 3600
-            }
-```
+```python
+import psycopg2
 
-#### Step 6-8: Client Connects to PostgreSQL
+conn = psycopg2.connect(
+    host="postgresql.oidc-postgres-demo.svc",
+    port=5432,
+    database="demo",
+    user="entra-app-name",      # The Entra ID app name or object ID
+    password=entra_token,        # The Entra ID access token
+    sslmode="require"
+)
 
-```
-Client App ──────────────────────────────► PostgreSQL
-            Connect with:
-            - Username: {entra-user-or-app-name}
-            - Password: {entra-access-token}
-            
-PostgreSQL:
-  ✓ Validates token against Entra ID JWKS
-  ✓ Checks user has database permissions
-  ✓ Establishes connection
-  
-Client App ◄────────────────────────────── PostgreSQL
-            Query results
+cursor = conn.cursor()
+cursor.execute("SELECT * FROM products")
+results = cursor.fetchall()
 ```
 
 ---
@@ -222,31 +205,24 @@ Client App ◄──────────────────────
 
 ### Azure Requirements
 
-1. **Azure Subscription** with permissions to create:
-   - App Registration in Entra ID
-   - Azure Database for PostgreSQL Flexible Server
+1. **Azure Subscription** with permissions to create App Registrations in Entra ID
 
 2. **Entra ID App Registration** with:
    - Federated Identity Credential configured to trust your SPIRE OIDC Discovery Provider
-   - API permissions for PostgreSQL access
-
-3. **Azure Database for PostgreSQL Flexible Server** with:
-   - Entra ID authentication enabled
-   - Database user mapped to the App Registration
+   - Issuer: `https://your-spire-oidc-discovery-provider-url`
+   - Subject: `spiffe://your-trust-domain/ns/oidc-postgres-demo/sa/spiffe-client`
 
 ### OpenShift/Kubernetes Requirements
 
 1. **SPIRE** deployed via Zero Trust Workload Identity Manager
 2. **SPIRE OIDC Discovery Provider** accessible from the internet (for Entra ID to fetch JWKS)
-3. **ClusterSPIFFEID** configured for the client workload
+3. **PostgreSQL 18** with `pg_oidc_validator` extension
 
 ---
 
 ## Deployment
 
 ### 1. Configure Entra ID
-
-#### Create App Registration
 
 ```bash
 # Login to Azure
@@ -255,14 +231,10 @@ az login
 # Create App Registration
 az ad app create --display-name "spiffe-postgres-client"
 
-# Note the Application (client) ID
+# Get Application ID
 APP_ID=$(az ad app list --display-name "spiffe-postgres-client" --query "[0].appId" -o tsv)
 echo "Application ID: $APP_ID"
-```
 
-#### Configure Federated Identity Credential
-
-```bash
 # Get your SPIRE OIDC Discovery Provider URL
 SPIRE_OIDC_URL="https://oidc-discovery.apps.your-cluster.example.com"
 
@@ -277,33 +249,40 @@ az ad app federated-credential create \
   }'
 ```
 
-### 2. Configure Azure PostgreSQL
+### 2. Deploy PostgreSQL 18 on OpenShift
+
+See `k8s/postgresql.yaml` for the deployment manifest.
 
 ```bash
-# Create PostgreSQL Flexible Server (if not exists)
-az postgres flexible-server create \
-  --name your-postgres-server \
-  --resource-group your-resource-group \
-  --location eastus \
-  --admin-user adminuser \
-  --admin-password YourSecurePassword123!
+# Apply PostgreSQL 18 deployment
+oc apply -f k8s/postgresql.yaml
 
-# Enable Entra ID authentication
-az postgres flexible-server ad-admin create \
-  --resource-group your-resource-group \
-  --server-name your-postgres-server \
-  --display-name "spiffe-postgres-client" \
-  --object-id $(az ad app show --id $APP_ID --query "id" -o tsv)
+# Verify PostgreSQL is running
+oc get pods -n oidc-postgres-demo
 ```
 
-### 3. Deploy the Client Application
+### 3. Configure PostgreSQL for OIDC Authentication
 
-See the `k8s/` folder for Kubernetes manifests and `client-app/` for the application code.
+```sql
+-- In PostgreSQL, configure pg_hba.conf for OAuth authentication
+-- host all all 0.0.0.0/0 oauth
+
+-- Configure the OAuth validator
+ALTER SYSTEM SET oauth.validator_library = 'pg_oidc_validator';
+ALTER SYSTEM SET oauth.issuer = 'https://login.microsoftonline.com/{tenant-id}/v2.0';
+ALTER SYSTEM SET oauth.client_id = '{your-azure-client-id}';
+
+SELECT pg_reload_conf();
+```
+
+### 4. Deploy the Client Application
 
 ```bash
 # Update ConfigMaps with your Azure credentials
-# Then apply manifests
-oc apply -f k8s/
+oc apply -f k8s/client-app.yaml
+
+# Build the application
+oc start-build client-app --from-dir=client-app/ -n oidc-postgres-demo --follow
 ```
 
 ---
@@ -316,10 +295,10 @@ SPIFFE SVID JWT Authentication with PostgreSQL/
 ├── k8s/
 │   ├── namespace.yaml           # Namespace definition
 │   ├── clusterspiffeid.yaml     # SPIRE workload registration
-│   ├── postgresql.yaml          # PostgreSQL deployment (for local testing)
+│   ├── postgresql.yaml          # PostgreSQL 18 with pg_oidc_validator
 │   └── client-app.yaml          # SPIFFE client deployment
 ├── client-app/
-│   ├── app.py                   # Flask app with SPIFFE + Entra ID integration
+│   ├── app.py                   # Flask app with SPIFFE + Entra ID + PostgreSQL
 │   ├── requirements.txt
 │   └── Dockerfile
 └── scripts/
@@ -328,9 +307,31 @@ SPIFFE SVID JWT Authentication with PostgreSQL/
 
 ---
 
+## PostgreSQL 18 OIDC Configuration
+
+### pg_hba.conf
+
+```
+# TYPE  DATABASE        USER            ADDRESS                 METHOD
+host    all             all             0.0.0.0/0               oauth
+```
+
+### postgresql.conf
+
+```
+# OAuth/OIDC Configuration
+oauth.validator_library = 'pg_oidc_validator'
+oauth.issuer = 'https://login.microsoftonline.com/{tenant-id}/v2.0'
+oauth.client_id = '{azure-client-id}'
+oauth.jwks_uri = 'https://login.microsoftonline.com/{tenant-id}/discovery/v2.0/keys'
+```
+
+---
+
 ## References
 
+- [PostgreSQL 18 OAuth Authentication Documentation](http://www.postgres.com/docs/18/auth-oauth.html)
+- [pg_oidc_validator Extension](https://www.postgresql.org/about/news/announcing-pg_oidc_validator-3160/)
+- [PostgreSQL 18 OIDC with Entra ID - Percona Blog](https://percona.community/blog/2025/10/22/say-hello-to-oidc-in-postgresql-18/)
 - [Microsoft Entra Workload Identity Federation](https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation)
-- [Azure Database for PostgreSQL - Entra ID Authentication](https://learn.microsoft.com/en-us/azure/postgresql/flexible-server/how-to-configure-sign-in-azure-ad-authentication)
 - [SPIFFE/SPIRE OIDC Discovery Provider](https://spiffe.io/docs/latest/microservices/oidc/)
-- [OAuth 2.0 Client Credentials with Federated Credentials](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-client-creds-grant-flow#third-case-access-token-request-with-a-federated-credential)
