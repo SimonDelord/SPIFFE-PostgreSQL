@@ -239,45 +239,163 @@ This creates an integration challenge: **How can SPIFFE-enabled workloads authen
 
 ## Demo Implementation
 
-In this demo, we will:
+### What We Built
 
-1. **Deploy a SPIFFE-enabled client application** that:
-   - Fetches a JWT-SVID from SPIRE
-   - Exchanges it for an enterprise OIDC token (simulated or real)
-   - Uses that token to authenticate to a target service
+This demo implements the Workload Identity Federation pattern using:
 
-2. **Deploy an OIDC-protected API server** that:
-   - Validates OIDC tokens (not JWT-SVIDs directly)
-   - Returns data based on token claims
+| Component | Production | This Demo |
+|-----------|------------|-----------|
+| **Enterprise IdP** | Microsoft Entra ID, AWS IAM, or GCP | **Keycloak** (emulating Entra ID) |
+| **Token Exchange** | Real RFC 8693 token exchange | **Mock Token Exchange** (validates JWT-SVID, issues OIDC token) |
+| **SPIFFE Identity** | SPIRE (production) | SPIRE via Zero Trust Workload Identity Manager |
+| **OIDC-only App** | Any OIDC-protected service | Flask API Server |
+
+### Demo Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                         DEMO ARCHITECTURE                                        │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────────┐    │
+│  │  Namespace: zero-trust-workload-identity-manager                         │    │
+│  │  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐      │    │
+│  │  │  SPIRE Server   │    │  SPIRE Agent    │    │  SPIRE OIDC     │      │    │
+│  │  │                 │    │  (DaemonSet)    │    │  Discovery      │      │    │
+│  │  │                 │    │                 │    │  Provider       │      │    │
+│  │  └────────┬────────┘    └────────┬────────┘    └────────┬────────┘      │    │
+│  │           │                      │                      │                │    │
+│  │           └──────────────────────┼──────────────────────┘                │    │
+│  │                                  │ Issues JWT-SVIDs                      │    │
+│  └──────────────────────────────────┼───────────────────────────────────────┘    │
+│                                     ▼                                            │
+│  ┌─────────────────────────────────────────────────────────────────────────┐    │
+│  │  Namespace: spiffe-jwt-demo                                              │    │
+│  │                                                                          │    │
+│  │  ┌─────────────────────────────────────────────────────────────────┐    │    │
+│  │  │  JWT Exchange Client (SPIFFE-enabled)                           │    │    │
+│  │  │                                                                  │    │    │
+│  │  │  1. Fetches JWT-SVID from SPIRE Agent                           │    │    │
+│  │  │  2. Validates JWT-SVID against SPIRE OIDC Discovery Provider    │    │    │
+│  │  │  3. Issues mock OIDC token (simulating Keycloak/Entra ID)       │    │    │
+│  │  │  4. Calls API Server with OIDC token                            │    │    │
+│  │  │                                                                  │    │    │
+│  │  └─────────────────────────────────┬───────────────────────────────┘    │    │
+│  │                                    │                                     │    │
+│  │                                    │ OIDC Token                          │    │
+│  │                                    ▼                                     │    │
+│  │  ┌─────────────────────────────────────────────────────────────────┐    │    │
+│  │  │  API Server (OIDC-only, does NOT understand SPIFFE)             │    │    │
+│  │  │                                                                  │    │    │
+│  │  │  • Validates OIDC tokens only                                   │    │    │
+│  │  │  • Does NOT have SPIFFE CSI driver mounted                      │    │    │
+│  │  │  • Returns data if token is valid                               │    │    │
+│  │  │                                                                  │    │    │
+│  │  └─────────────────────────────────────────────────────────────────┘    │    │
+│  │                                                                          │    │
+│  └──────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────────┐    │
+│  │  Namespace: keycloak                                                     │    │
+│  │                                                                          │    │
+│  │  ┌─────────────────┐    ┌─────────────────┐                             │    │
+│  │  │  Keycloak       │    │  PostgreSQL     │                             │    │
+│  │  │  (IdP)          │────│  (Database)     │                             │    │
+│  │  │                 │    │                 │                             │    │
+│  │  │  Configured     │    └─────────────────┘                             │    │
+│  │  │  with:          │                                                     │    │
+│  │  │  • spiffe-demo  │                                                     │    │
+│  │  │    realm        │                                                     │    │
+│  │  │  • SPIRE OIDC   │                                                     │    │
+│  │  │    as IdP       │                                                     │    │
+│  │  └─────────────────┘                                                     │    │
+│  │                                                                          │    │
+│  └──────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                  │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### How the Mock Token Exchange Works
+
+Since configuring real Keycloak Token Exchange (RFC 8693) requires complex fine-grained authorization, this demo uses a **mock token exchange** that accurately demonstrates the pattern:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    MOCK TOKEN EXCHANGE FLOW                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  Client App                    SPIRE OIDC                   API Server       │
+│      │                         Provider                          │           │
+│      │                            │                              │           │
+│      │  1. Get JWT-SVID           │                              │           │
+│      │     from SPIRE Agent       │                              │           │
+│      │                            │                              │           │
+│      │  2. Validate JWT-SVID ────►│                              │           │
+│      │     (fetch JWKS, verify)   │                              │           │
+│      │                            │                              │           │
+│      │  3. JWT-SVID is valid ◄────│                              │           │
+│      │                            │                              │           │
+│      │  4. Issue mock OIDC token  │                              │           │
+│      │     (simulating Keycloak)  │                              │           │
+│      │     {                      │                              │           │
+│      │       "iss": "keycloak",   │                              │           │
+│      │       "sub": "{spiffe-id}",│                              │           │
+│      │       "aud": "api-server"  │                              │           │
+│      │     }                      │                              │           │
+│      │                            │                              │           │
+│      │  5. Call API with OIDC token ─────────────────────────────►          │
+│      │                            │                              │           │
+│      │                            │              6. Validate token           │
+│      │                            │                 (mock validation)        │
+│      │                            │                              │           │
+│      │  7. Return data ◄──────────────────────────────────────────          │
+│      │                            │                              │           │
+│                                                                              │
+│  KEY POINT: The JWT-SVID is REALLY validated against SPIRE OIDC Discovery   │
+│  Provider. Only the token issuance is mocked.                               │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Deployed Components
+
+| Component | Namespace | Description |
+|-----------|-----------|-------------|
+| **Keycloak** | `keycloak` | Enterprise IdP (emulating Entra ID) with SPIRE as trusted Identity Provider |
+| **JWT Exchange Client** | `spiffe-jwt-demo` | SPIFFE-enabled app that gets JWT-SVIDs and exchanges for OIDC tokens |
+| **API Server** | `spiffe-jwt-demo` | OIDC-only app that validates Keycloak tokens |
+| **SPIRE** | `zero-trust-workload-identity-manager` | Issues JWT-SVIDs and X.509-SVIDs |
+
+### Live Demo URLs
+
+After deployment, the following URLs are available:
+
+- **JWT Exchange Client**: `https://jwt-exchange-client-spiffe-jwt-demo.apps.<cluster-domain>`
+- **API Server**: `https://api-server-spiffe-jwt-demo.apps.<cluster-domain>`
+- **Keycloak Admin**: `https://keycloak-keycloak.apps.<cluster-domain>`
 
 ### Folder Structure
 
 ```
 SPIFFE SVID JWT Authentication with PostgreSQL/
 ├── README.md                    # This file
+├── deployment-guide/            # Step-by-step deployment instructions
+│   └── README.md
 ├── k8s/
-│   ├── client-app/
-│   │   ├── deployment.yaml
-│   │   ├── service.yaml
-│   │   ├── clusterspiffeid.yaml
-│   │   └── configmap.yaml
-│   ├── api-server/
-│   │   ├── deployment.yaml
-│   │   ├── service.yaml
-│   │   └── configmap.yaml
-│   └── token-exchange-mock/     # Simulates Entra ID token exchange
-│       ├── deployment.yaml
-│       └── service.yaml
+│   ├── namespace.yaml           # spiffe-jwt-demo namespace
+│   ├── clusterspiffeid.yaml     # SPIRE workload registration
+│   ├── client-app.yaml          # JWT Exchange Client deployment
+│   └── api-server.yaml          # OIDC-only API Server deployment
 ├── client-app/
-│   ├── app.py
+│   ├── app.py                   # Flask app with SPIFFE + token exchange
 │   ├── requirements.txt
 │   └── Dockerfile
 ├── api-server/
-│   ├── app.py
+│   ├── app.py                   # Flask app validating OIDC tokens
 │   ├── requirements.txt
 │   └── Dockerfile
 └── scripts/
-    └── deploy.sh
+    └── deploy.sh                # Automated deployment script
 ```
 
 ---
@@ -286,9 +404,13 @@ SPIFFE SVID JWT Authentication with PostgreSQL/
 
 1. **OpenShift cluster** with Zero Trust Workload Identity Manager installed
 2. **SPIRE OIDC Discovery Provider** deployed and accessible
-3. **Enterprise IdP** (Entra ID, AWS IAM, or GCP) configured with:
-   - SPIRE OIDC Discovery Provider as a trusted issuer
-   - Federated Identity Credential for the specific SPIFFE ID
+3. **Keycloak** deployed (or use the deployment guide to deploy it)
+
+---
+
+## Deployment
+
+For step-by-step deployment instructions, see the [Deployment Guide](deployment-guide/README.md).
 
 ---
 
