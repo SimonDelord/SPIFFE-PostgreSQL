@@ -1,6 +1,6 @@
-# SPIFFE JWT-SVID Authentication with Enterprise IdP (Workload Identity Federation)
+# SPIFFE JWT-SVID Authentication with PostgreSQL via Entra ID
 
-This document describes how a **SPIFFE-enabled workload** can authenticate to services that only understand **OIDC tokens** by leveraging **Workload Identity Federation** with an enterprise Identity Provider (like Microsoft Entra ID, AWS IAM, or Google Cloud).
+This document describes how a **SPIFFE-enabled workload** can authenticate directly to **PostgreSQL** by leveraging **Workload Identity Federation** with **Microsoft Entra ID** (formerly Azure AD).
 
 ## Table of Contents
 
@@ -9,17 +9,20 @@ This document describes how a **SPIFFE-enabled workload** can authenticate to se
 - [The Solution: Workload Identity Federation](#the-solution-workload-identity-federation)
 - [Architecture](#architecture)
 - [How It Works](#how-it-works)
-- [Demo Implementation](#demo-implementation)
 - [Prerequisites](#prerequisites)
+- [Deployment](#deployment)
 - [References](#references)
 
 ---
 
 ## Overview
 
-In enterprise environments, organizations often have a centralized Identity Provider (IdP) like **Microsoft Entra ID** (formerly Azure AD) that manages identities for all applications and services. However, modern cloud-native workloads may use **SPIFFE/SPIRE** for workload identity.
+In enterprise environments, organizations often use **Microsoft Entra ID** as their centralized Identity Provider. **Azure Database for PostgreSQL** supports native Entra ID authentication, allowing applications to connect using OIDC tokens instead of passwords.
 
-This creates an integration challenge: **How can SPIFFE-enabled workloads authenticate to services that only understand the enterprise IdP's OIDC tokens?**
+This demo shows how **SPIFFE-enabled workloads** running on Kubernetes can authenticate to PostgreSQL by:
+1. Obtaining a **JWT-SVID** from SPIRE
+2. Exchanging it for an **Entra ID access token** via Workload Identity Federation
+3. Connecting directly to **PostgreSQL** using the Entra ID token
 
 ---
 
@@ -30,129 +33,98 @@ This creates an integration challenge: **How can SPIFFE-enabled workloads authen
 │                           THE CHALLENGE                                      │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
-│   SPIFFE World                              Enterprise OIDC World            │
+│   SPIFFE World                              Enterprise World                 │
 │   ┌─────────────────┐                       ┌─────────────────┐             │
 │   │                 │                       │                 │             │
-│   │   App A         │     ───────?──────►   │   App B         │             │
-│   │  (SPIFFE        │     JWT-SVID          │  (Only trusts   │             │
-│   │   enabled)      │     not accepted!     │   Entra ID)     │             │
-│   │                 │                       │                 │             │
+│   │   App A         │     ───────?──────►   │   PostgreSQL    │             │
+│   │  (SPIFFE        │     JWT-SVID          │  (Only accepts  │             │
+│   │   enabled)      │     not accepted!     │   Entra ID      │             │
+│   │                 │                       │   tokens)       │             │
 │   └─────────────────┘                       └─────────────────┘             │
 │                                                                              │
 │   App A has a JWT-SVID from SPIRE                                           │
-│   App B only validates tokens from Entra ID                                 │
+│   PostgreSQL only accepts Entra ID tokens                                   │
 │   How do they communicate?                                                   │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Challenges:**
-1. App B doesn't know how to validate JWT-SVIDs
-2. App B's authorization logic is based on Entra ID roles/claims
-3. The enterprise security team requires all access to go through Entra ID
+1. PostgreSQL doesn't understand JWT-SVIDs
+2. The enterprise security team requires all database access to go through Entra ID
+3. Need a way to bridge SPIFFE identity to Entra ID identity
 
 ---
 
 ## The Solution: Workload Identity Federation
 
-**Workload Identity Federation** allows external identity providers (like SPIFFE/SPIRE) to exchange their tokens for tokens from the enterprise IdP (like Entra ID).
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                     WORKLOAD IDENTITY FEDERATION                             │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│   ┌─────────────┐                                                           │
-│   │   SPIRE     │                                                           │
-│   │   Server    │                                                           │
-│   └──────┬──────┘                                                           │
-│          │                                                                   │
-│          │ 1. Issue JWT-SVID                                                │
-│          ▼                                                                   │
-│   ┌─────────────┐     2. Present JWT-SVID      ┌─────────────────────┐     │
-│   │   App A     │─────────────────────────────►│                     │     │
-│   │  (SPIFFE    │                              │   Enterprise IdP    │     │
-│   │   enabled)  │◄─────────────────────────────│   (Entra ID)        │     │
-│   └──────┬──────┘     3. Return OIDC Token     │                     │     │
-│          │                                      │  • Validates SVID   │     │
-│          │                                      │  • Checks policy    │     │
-│          │                                      │  • Issues token     │     │
-│          │                                      └──────────┬──────────┘     │
-│          │                                                 │                 │
-│          │                                                 │ Fetch JWKS     │
-│          │                                                 ▼                 │
-│          │                                      ┌─────────────────────┐     │
-│          │                                      │  SPIRE OIDC         │     │
-│          │                                      │  Discovery Provider │     │
-│          │                                      │  /.well-known/...   │     │
-│          │                                      │  /keys              │     │
-│          │                                      └─────────────────────┘     │
-│          │                                                                   │
-│          │ 4. Call with Entra ID Token                                      │
-│          ▼                                                                   │
-│   ┌─────────────┐                                                           │
-│   │   App B     │  ✓ Validates Entra ID token                              │
-│   │  (OIDC only)│  ✓ Extracts roles/permissions                            │
-│   │             │  ✓ Grants access                                          │
-│   └─────────────┘                                                           │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+**Workload Identity Federation** allows external identity providers (like SPIFFE/SPIRE) to exchange their tokens for Entra ID tokens. Entra ID validates the JWT-SVID by fetching the JWKS from the **SPIRE OIDC Discovery Provider**.
 
 ---
 
 ## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                      SPIFFE → ENTRA ID → POSTGRESQL FLOW                                │
+├─────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                         │
+│  ┌──────────────┐     ┌─────────────────────────────┐     ┌──────────────┐             │
+│  │              │     │        SPIRE Server         │     │              │             │
+│  │   SPIFFE     │     │  ┌───────────────────────┐  │     │   Entra ID   │             │
+│  │   Client     │     │  │  SPIRE OIDC Discovery │  │     │  (Azure AD)  │             │
+│  │              │     │  │  Provider             │  │     │              │             │
+│  │              │     │  │  (/.well-known, /keys)│  │     │              │             │
+│  └──────┬───────┘     │  └───────────┬───────────┘  │     └──────┬───────┘             │
+│         │             └──────────────┼──────────────┘            │                     │
+│         │                            │                           │                     │
+│         │                            │                           │      ┌────────────┐ │
+│         │                            │                           │      │ PostgreSQL │ │
+│         │                            │                           │      │ (Azure DB) │ │
+│         │                            │                           │      └──────┬─────┘ │
+│         │                            │                           │             │       │
+│    1.   │ Request JWT-SVID           │                           │             │       │
+│         │───────────────────────────►│                           │             │       │
+│         │                            │                           │             │       │
+│    2.   │◄───────────────────────────│ Issue JWT-SVID            │             │       │
+│         │       (signed JWT)         │                           │             │       │
+│         │                            │                           │             │       │
+│    3.   │ Exchange JWT-SVID for Entra ID token                   │             │       │
+│         │───────────────────────────────────────────────────────►│             │       │
+│         │            (Workload Identity Federation)              │             │       │
+│         │                            │                           │             │       │
+│    4.   │                            │◄──────────────────────────│             │       │
+│         │                            │  Fetch JWKS to validate   │             │       │
+│         │                            │  JWT-SVID signature       │             │       │
+│         │                            │──────────────────────────►│             │       │
+│         │                            │                           │             │       │
+│    5.   │◄───────────────────────────────────────────────────────│             │       │
+│         │              Entra ID Access Token                     │             │       │
+│         │                            │                           │             │       │
+│    6.   │ Connect to PostgreSQL with Entra ID token              │             │       │
+│         │────────────────────────────────────────────────────────────────────►│       │
+│         │                            │                           │             │       │
+│    7.   │                            │                           │◄────────────│       │
+│         │                            │                           │ Validate    │       │
+│         │                            │                           │ token via   │       │
+│         │                            │                           │ Entra JWKS  │       │
+│         │                            │                           │────────────►│       │
+│         │                            │                           │             │       │
+│    8.   │◄─────────────────────────────────────────────────────────────────────│       │
+│         │                            │        Return data        │             │       │
+│                                                                                         │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
 
 ### Components
 
 | Component | Role |
 |-----------|------|
 | **SPIRE Server** | Issues JWT-SVIDs to registered workloads |
-| **SPIRE OIDC Discovery Provider** | Exposes JWKS endpoint for JWT-SVID validation |
-| **Enterprise IdP (Entra ID)** | Validates JWT-SVIDs and issues enterprise tokens |
-| **App A (SPIFFE-enabled)** | Obtains JWT-SVID, exchanges for enterprise token |
-| **App B (OIDC-only)** | Validates enterprise tokens, serves requests |
-
-### Trust Chain
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           TRUST CHAIN                                        │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│   SPIRE Server ──────► SPIRE OIDC Discovery Provider                        │
-│        │                         │                                           │
-│        │ Signs JWT-SVIDs         │ Publishes JWKS                           │
-│        │                         │                                           │
-│        ▼                         ▼                                           │
-│   ┌─────────────────────────────────────────────────────────┐               │
-│   │                                                          │               │
-│   │   Enterprise IdP (Entra ID)                             │               │
-│   │                                                          │               │
-│   │   Federated Identity Credential:                        │               │
-│   │   ┌────────────────────────────────────────────────┐    │               │
-│   │   │ Issuer: https://spire-oidc.example.com         │    │               │
-│   │   │ Subject: spiffe://trust-domain/ns/prod/sa/app-a│    │               │
-│   │   │ Audience: api://AzureADTokenExchange           │    │               │
-│   │   └────────────────────────────────────────────────┘    │               │
-│   │                                                          │               │
-│   │   "I trust JWT-SVIDs from this SPIRE instance            │               │
-│   │    for workloads with these specific SPIFFE IDs"        │               │
-│   │                                                          │               │
-│   └─────────────────────────────────────────────────────────┘               │
-│                              │                                               │
-│                              │ Issues Entra ID tokens                       │
-│                              ▼                                               │
-│   ┌─────────────────────────────────────────────────────────┐               │
-│   │                                                          │               │
-│   │   App B (and other Entra ID-protected resources)        │               │
-│   │                                                          │               │
-│   │   Validates tokens using Entra ID JWKS                  │               │
-│   │                                                          │               │
-│   └─────────────────────────────────────────────────────────┘               │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+| **SPIRE OIDC Discovery Provider** | Exposes JWKS endpoint (`/keys`) for JWT-SVID validation |
+| **Microsoft Entra ID** | Validates JWT-SVIDs via OIDC Discovery Provider, issues access tokens |
+| **SPIFFE Client App** | Obtains JWT-SVID, exchanges for Entra ID token, connects to PostgreSQL |
+| **Azure Database for PostgreSQL** | Validates Entra ID tokens, serves database queries |
 
 ---
 
@@ -160,238 +132,194 @@ This creates an integration challenge: **How can SPIFFE-enabled workloads authen
 
 ### Step-by-Step Flow
 
+#### Step 1: Client Requests JWT-SVID from SPIRE
+
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        TOKEN EXCHANGE FLOW                                   │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  Step 1: App A obtains JWT-SVID from SPIRE                                  │
-│  ─────────────────────────────────────────                                  │
-│                                                                              │
-│  App A ──────────────────────────────────────────────► SPIRE Agent          │
-│         Request JWT-SVID                                                     │
-│         audience: "api://AzureADTokenExchange"                              │
-│                                                                              │
-│  App A ◄────────────────────────────────────────────── SPIRE Agent          │
-│         JWT-SVID:                                                            │
-│         {                                                                    │
-│           "iss": "https://spire-oidc.example.com",                          │
-│           "sub": "spiffe://trust-domain/ns/prod/sa/app-a",                  │
-│           "aud": "api://AzureADTokenExchange",                              │
-│           "exp": 1234567890,                                                │
-│           "iat": 1234567800                                                 │
-│         }                                                                    │
-│                                                                              │
-│  ────────────────────────────────────────────────────────────────────────   │
-│                                                                              │
-│  Step 2: App A exchanges JWT-SVID for Entra ID token                        │
-│  ─────────────────────────────────────────────────────                      │
-│                                                                              │
-│  App A ──────────────────────────────────────────────► Entra ID             │
-│         POST /oauth2/v2.0/token                                             │
-│         client_id={app-registration-id}                                     │
-│         client_assertion_type=urn:ietf:params:oauth:                        │
-│                                client-assertion-type:jwt-bearer             │
-│         client_assertion={JWT-SVID}                                         │
-│         grant_type=client_credentials                                       │
-│         scope=api://app-b/.default                                          │
-│                                                                              │
-│  Entra ID internally:                                                        │
-│  ┌────────────────────────────────────────────────────────────────────┐     │
-│  │ 1. Parse JWT-SVID header to get "kid"                              │     │
-│  │ 2. Fetch JWKS from https://spire-oidc.example.com/keys            │     │
-│  │ 3. Verify signature using SPIRE's public key                       │     │
-│  │ 4. Check "iss" matches Federated Identity Credential               │     │
-│  │ 5. Check "sub" (SPIFFE ID) matches allowed subject                 │     │
-│  │ 6. Check "aud" matches expected audience                           │     │
-│  │ 7. Check token is not expired                                      │     │
-│  │ 8. All checks pass → Issue Entra ID access token                   │     │
-│  └────────────────────────────────────────────────────────────────────┘     │
-│                                                                              │
-│  App A ◄────────────────────────────────────────────── Entra ID             │
-│         {                                                                    │
-│           "access_token": "eyJ0eXAiOi...",                                  │
-│           "token_type": "Bearer",                                           │
-│           "expires_in": 3600                                                │
-│         }                                                                    │
-│                                                                              │
-│  ────────────────────────────────────────────────────────────────────────   │
-│                                                                              │
-│  Step 3: App A calls App B with Entra ID token                              │
-│  ─────────────────────────────────────────────────                          │
-│                                                                              │
-│  App A ──────────────────────────────────────────────► App B                │
-│         GET /api/data                                                        │
-│         Authorization: Bearer {Entra ID Access Token}                       │
-│                                                                              │
-│  App B validates token against Entra ID JWKS                                │
-│  App B extracts claims (roles, permissions)                                 │
-│  App B serves request                                                        │
-│                                                                              │
-│  App A ◄────────────────────────────────────────────── App B                │
-│         200 OK                                                               │
-│         {"data": "..."}                                                      │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
+Client App ──────────────────────────────► SPIRE Agent
+            Request JWT-SVID
+            audience: "{azure-client-id}"
+```
+
+The SPIFFE-enabled client uses the Workload API to request a JWT-SVID with the Azure application's client ID as the audience.
+
+#### Step 2: SPIRE Issues JWT-SVID
+
+```
+Client App ◄────────────────────────────── SPIRE Agent
+            JWT-SVID:
+            {
+              "iss": "https://spire-oidc.example.com",
+              "sub": "spiffe://trust-domain/ns/app/sa/client",
+              "aud": "{azure-client-id}",
+              "exp": 1234567890,
+              "iat": 1234567800
+            }
+```
+
+SPIRE signs the JWT-SVID with its private key. The public key is available via the OIDC Discovery Provider.
+
+#### Step 3: Client Exchanges JWT-SVID for Entra ID Token
+
+```
+Client App ──────────────────────────────► Entra ID
+            POST /oauth2/v2.0/token
+            
+            client_id={azure-app-registration-id}
+            client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer
+            client_assertion={JWT-SVID}
+            grant_type=client_credentials
+            scope=https://ossrdbms-aad.database.windows.net/.default
+```
+
+The client sends the JWT-SVID to Entra ID's token endpoint using the `client_credentials` grant with `client_assertion`.
+
+#### Step 4: Entra ID Validates JWT-SVID
+
+```
+Entra ID ──────────────────────────────► SPIRE OIDC Discovery Provider
+          GET /.well-known/openid-configuration
+          GET /keys (JWKS)
+          
+Entra ID validates:
+  ✓ Signature (using SPIRE's public key from JWKS)
+  ✓ Issuer matches Federated Identity Credential
+  ✓ Subject (SPIFFE ID) matches allowed pattern
+  ✓ Audience matches expected value
+  ✓ Token is not expired
+```
+
+#### Step 5: Entra ID Issues Access Token
+
+```
+Client App ◄────────────────────────────── Entra ID
+            {
+              "access_token": "eyJ0eXAiOiJKV1...",
+              "token_type": "Bearer",
+              "expires_in": 3600
+            }
+```
+
+#### Step 6-8: Client Connects to PostgreSQL
+
+```
+Client App ──────────────────────────────► PostgreSQL
+            Connect with:
+            - Username: {entra-user-or-app-name}
+            - Password: {entra-access-token}
+            
+PostgreSQL:
+  ✓ Validates token against Entra ID JWKS
+  ✓ Checks user has database permissions
+  ✓ Establishes connection
+  
+Client App ◄────────────────────────────── PostgreSQL
+            Query results
 ```
 
 ---
 
-## Demo Implementation
+## Prerequisites
 
-### What We Built
+### Azure Requirements
 
-This demo implements the Workload Identity Federation pattern using:
+1. **Azure Subscription** with permissions to create:
+   - App Registration in Entra ID
+   - Azure Database for PostgreSQL Flexible Server
 
-| Component | Production | This Demo |
-|-----------|------------|-----------|
-| **Enterprise IdP** | Microsoft Entra ID, AWS IAM, or GCP | **Keycloak** (emulating Entra ID) |
-| **Token Exchange** | Real RFC 8693 token exchange | **Mock Token Exchange** (validates JWT-SVID, issues OIDC token) |
-| **SPIFFE Identity** | SPIRE (production) | SPIRE via Zero Trust Workload Identity Manager |
-| **OIDC-only App** | Any OIDC-protected service | Flask API Server |
+2. **Entra ID App Registration** with:
+   - Federated Identity Credential configured to trust your SPIRE OIDC Discovery Provider
+   - API permissions for PostgreSQL access
 
-### Demo Architecture
+3. **Azure Database for PostgreSQL Flexible Server** with:
+   - Entra ID authentication enabled
+   - Database user mapped to the App Registration
 
-```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                         DEMO ARCHITECTURE                                        │
-├─────────────────────────────────────────────────────────────────────────────────┤
-│                                                                                  │
-│  ┌─────────────────────────────────────────────────────────────────────────┐    │
-│  │  Namespace: zero-trust-workload-identity-manager                         │    │
-│  │  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐      │    │
-│  │  │  SPIRE Server   │    │  SPIRE Agent    │    │  SPIRE OIDC     │      │    │
-│  │  │                 │    │  (DaemonSet)    │    │  Discovery      │      │    │
-│  │  │                 │    │                 │    │  Provider       │      │    │
-│  │  └────────┬────────┘    └────────┬────────┘    └────────┬────────┘      │    │
-│  │           │                      │                      │                │    │
-│  │           └──────────────────────┼──────────────────────┘                │    │
-│  │                                  │ Issues JWT-SVIDs                      │    │
-│  └──────────────────────────────────┼───────────────────────────────────────┘    │
-│                                     ▼                                            │
-│  ┌─────────────────────────────────────────────────────────────────────────┐    │
-│  │  Namespace: spiffe-jwt-demo                                              │    │
-│  │                                                                          │    │
-│  │  ┌─────────────────────────────────────────────────────────────────┐    │    │
-│  │  │  JWT Exchange Client (SPIFFE-enabled)                           │    │    │
-│  │  │                                                                  │    │    │
-│  │  │  1. Fetches JWT-SVID from SPIRE Agent                           │    │    │
-│  │  │  2. Validates JWT-SVID against SPIRE OIDC Discovery Provider    │    │    │
-│  │  │  3. Issues mock OIDC token (simulating Keycloak/Entra ID)       │    │    │
-│  │  │  4. Calls API Server with OIDC token                            │    │    │
-│  │  │                                                                  │    │    │
-│  │  └─────────────────────────────────┬───────────────────────────────┘    │    │
-│  │                                    │                                     │    │
-│  │                                    │ OIDC Token                          │    │
-│  │                                    ▼                                     │    │
-│  │  ┌─────────────────────────────────────────────────────────────────┐    │    │
-│  │  │  API Server (OIDC-only, does NOT understand SPIFFE)             │    │    │
-│  │  │                                                                  │    │    │
-│  │  │  • Validates OIDC tokens only                                   │    │    │
-│  │  │  • Does NOT have SPIFFE CSI driver mounted                      │    │    │
-│  │  │  • Returns data if token is valid                               │    │    │
-│  │  │                                                                  │    │    │
-│  │  └─────────────────────────────────────────────────────────────────┘    │    │
-│  │                                                                          │    │
-│  └──────────────────────────────────────────────────────────────────────────┘    │
-│                                                                                  │
-│  ┌─────────────────────────────────────────────────────────────────────────┐    │
-│  │  Namespace: keycloak                                                     │    │
-│  │                                                                          │    │
-│  │  ┌─────────────────┐    ┌─────────────────┐                             │    │
-│  │  │  Keycloak       │    │  PostgreSQL     │                             │    │
-│  │  │  (IdP)          │────│  (Database)     │                             │    │
-│  │  │                 │    │                 │                             │    │
-│  │  │  Configured     │    └─────────────────┘                             │    │
-│  │  │  with:          │                                                     │    │
-│  │  │  • spiffe-demo  │                                                     │    │
-│  │  │    realm        │                                                     │    │
-│  │  │  • SPIRE OIDC   │                                                     │    │
-│  │  │    as IdP       │                                                     │    │
-│  │  └─────────────────┘                                                     │    │
-│  │                                                                          │    │
-│  └──────────────────────────────────────────────────────────────────────────┘    │
-│                                                                                  │
-└─────────────────────────────────────────────────────────────────────────────────┘
+### OpenShift/Kubernetes Requirements
+
+1. **SPIRE** deployed via Zero Trust Workload Identity Manager
+2. **SPIRE OIDC Discovery Provider** accessible from the internet (for Entra ID to fetch JWKS)
+3. **ClusterSPIFFEID** configured for the client workload
+
+---
+
+## Deployment
+
+### 1. Configure Entra ID
+
+#### Create App Registration
+
+```bash
+# Login to Azure
+az login
+
+# Create App Registration
+az ad app create --display-name "spiffe-postgres-client"
+
+# Note the Application (client) ID
+APP_ID=$(az ad app list --display-name "spiffe-postgres-client" --query "[0].appId" -o tsv)
+echo "Application ID: $APP_ID"
 ```
 
-### How the Mock Token Exchange Works
+#### Configure Federated Identity Credential
 
-Since configuring real Keycloak Token Exchange (RFC 8693) requires complex fine-grained authorization, this demo uses a **mock token exchange** that accurately demonstrates the pattern:
+```bash
+# Get your SPIRE OIDC Discovery Provider URL
+SPIRE_OIDC_URL="https://oidc-discovery.apps.your-cluster.example.com"
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                    MOCK TOKEN EXCHANGE FLOW                                  │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  Client App                    SPIRE OIDC                   API Server       │
-│      │                         Provider                          │           │
-│      │                            │                              │           │
-│      │  1. Get JWT-SVID           │                              │           │
-│      │     from SPIRE Agent       │                              │           │
-│      │                            │                              │           │
-│      │  2. Validate JWT-SVID ────►│                              │           │
-│      │     (fetch JWKS, verify)   │                              │           │
-│      │                            │                              │           │
-│      │  3. JWT-SVID is valid ◄────│                              │           │
-│      │                            │                              │           │
-│      │  4. Issue mock OIDC token  │                              │           │
-│      │     (simulating Keycloak)  │                              │           │
-│      │     {                      │                              │           │
-│      │       "iss": "keycloak",   │                              │           │
-│      │       "sub": "{spiffe-id}",│                              │           │
-│      │       "aud": "api-server"  │                              │           │
-│      │     }                      │                              │           │
-│      │                            │                              │           │
-│      │  5. Call API with OIDC token ─────────────────────────────►          │
-│      │                            │                              │           │
-│      │                            │              6. Validate token           │
-│      │                            │                 (mock validation)        │
-│      │                            │                              │           │
-│      │  7. Return data ◄──────────────────────────────────────────          │
-│      │                            │                              │           │
-│                                                                              │
-│  KEY POINT: The JWT-SVID is REALLY validated against SPIRE OIDC Discovery   │
-│  Provider. Only the token issuance is mocked.                               │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
+# Create Federated Identity Credential
+az ad app federated-credential create \
+  --id $APP_ID \
+  --parameters '{
+    "name": "spiffe-federation",
+    "issuer": "'$SPIRE_OIDC_URL'",
+    "subject": "spiffe://your-trust-domain/ns/oidc-postgres-demo/sa/spiffe-client",
+    "audiences": ["'$APP_ID'"]
+  }'
 ```
 
-### Deployed Components
+### 2. Configure Azure PostgreSQL
 
-| Component | Namespace | Description |
-|-----------|-----------|-------------|
-| **Keycloak** | `keycloak` | Enterprise IdP (emulating Entra ID) with SPIRE as trusted Identity Provider |
-| **JWT Exchange Client** | `spiffe-jwt-demo` | SPIFFE-enabled app that gets JWT-SVIDs and exchanges for OIDC tokens |
-| **API Server** | `spiffe-jwt-demo` | OIDC-only app that validates Keycloak tokens |
-| **SPIRE** | `zero-trust-workload-identity-manager` | Issues JWT-SVIDs and X.509-SVIDs |
+```bash
+# Create PostgreSQL Flexible Server (if not exists)
+az postgres flexible-server create \
+  --name your-postgres-server \
+  --resource-group your-resource-group \
+  --location eastus \
+  --admin-user adminuser \
+  --admin-password YourSecurePassword123!
 
-### Live Demo URLs
+# Enable Entra ID authentication
+az postgres flexible-server ad-admin create \
+  --resource-group your-resource-group \
+  --server-name your-postgres-server \
+  --display-name "spiffe-postgres-client" \
+  --object-id $(az ad app show --id $APP_ID --query "id" -o tsv)
+```
 
-After deployment, the following URLs are available:
+### 3. Deploy the Client Application
 
-- **JWT Exchange Client**: `https://jwt-exchange-client-spiffe-jwt-demo.apps.<cluster-domain>`
-- **API Server**: `https://api-server-spiffe-jwt-demo.apps.<cluster-domain>`
-- **Keycloak Admin**: `https://keycloak-keycloak.apps.<cluster-domain>`
+See the `k8s/` folder for Kubernetes manifests and `client-app/` for the application code.
 
-### Folder Structure
+```bash
+# Update ConfigMaps with your Azure credentials
+# Then apply manifests
+oc apply -f k8s/
+```
+
+---
+
+## Folder Structure
 
 ```
 SPIFFE SVID JWT Authentication with PostgreSQL/
 ├── README.md                    # This file
-├── deployment-guide/            # Step-by-step deployment instructions
-│   └── README.md
 ├── k8s/
-│   ├── namespace.yaml           # spiffe-jwt-demo namespace
+│   ├── namespace.yaml           # Namespace definition
 │   ├── clusterspiffeid.yaml     # SPIRE workload registration
-│   ├── client-app.yaml          # JWT Exchange Client deployment
-│   └── api-server.yaml          # OIDC-only API Server deployment
+│   ├── postgresql.yaml          # PostgreSQL deployment (for local testing)
+│   └── client-app.yaml          # SPIFFE client deployment
 ├── client-app/
-│   ├── app.py                   # Flask app with SPIFFE + token exchange
-│   ├── requirements.txt
-│   └── Dockerfile
-├── api-server/
-│   ├── app.py                   # Flask app validating OIDC tokens
+│   ├── app.py                   # Flask app with SPIFFE + Entra ID integration
 │   ├── requirements.txt
 │   └── Dockerfile
 └── scripts/
@@ -400,24 +328,9 @@ SPIFFE SVID JWT Authentication with PostgreSQL/
 
 ---
 
-## Prerequisites
-
-1. **OpenShift cluster** with Zero Trust Workload Identity Manager installed
-2. **SPIRE OIDC Discovery Provider** deployed and accessible
-3. **Keycloak** deployed (or use the deployment guide to deploy it)
-
----
-
-## Deployment
-
-For step-by-step deployment instructions, see the [Deployment Guide](deployment-guide/README.md).
-
----
-
 ## References
 
 - [Microsoft Entra Workload Identity Federation](https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation)
-- [AWS IAM OIDC Identity Providers](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_create_oidc.html)
-- [GCP Workload Identity Federation](https://cloud.google.com/iam/docs/workload-identity-federation)
+- [Azure Database for PostgreSQL - Entra ID Authentication](https://learn.microsoft.com/en-us/azure/postgresql/flexible-server/how-to-configure-sign-in-azure-ad-authentication)
 - [SPIFFE/SPIRE OIDC Discovery Provider](https://spiffe.io/docs/latest/microservices/oidc/)
-- [RFC 8693 - OAuth 2.0 Token Exchange](https://datatracker.ietf.org/doc/html/rfc8693)
+- [OAuth 2.0 Client Credentials with Federated Credentials](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-client-creds-grant-flow#third-case-access-token-request-with-a-federated-credential)

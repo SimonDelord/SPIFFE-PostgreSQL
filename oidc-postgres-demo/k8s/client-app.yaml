@@ -1,0 +1,123 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spiffe-client
+  namespace: oidc-postgres-demo
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: client-app-config
+  namespace: oidc-postgres-demo
+data:
+  # Azure Entra ID configuration - UPDATE THESE VALUES
+  AZURE_TENANT_ID: "YOUR_TENANT_ID"
+  AZURE_CLIENT_ID: "YOUR_CLIENT_ID"
+  # API Server URL
+  API_SERVER_URL: "http://api-server:8080"
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: client-app
+  namespace: oidc-postgres-demo
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: client-app
+  namespace: oidc-postgres-demo
+spec:
+  source:
+    type: Binary
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Dockerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: client-app:latest
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: client-app
+  namespace: oidc-postgres-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: client-app
+  template:
+    metadata:
+      labels:
+        app: client-app
+    spec:
+      serviceAccountName: spiffe-client
+      containers:
+        - name: client-app
+          image: image-registry.openshift-image-registry.svc:5000/oidc-postgres-demo/client-app:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: "unix:///spiffe-workload-api/spire-agent.sock"
+          envFrom:
+            - configMapRef:
+                name: client-app-config
+          volumeMounts:
+            - name: spiffe-workload-api
+              mountPath: /spiffe-workload-api
+              readOnly: true
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: spiffe-workload-api
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: client-app
+  namespace: oidc-postgres-demo
+spec:
+  ports:
+    - port: 8080
+      targetPort: 8080
+  selector:
+    app: client-app
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: client-app
+  namespace: oidc-postgres-demo
+spec:
+  to:
+    kind: Service
+    name: client-app
+  port:
+    targetPort: 8080
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

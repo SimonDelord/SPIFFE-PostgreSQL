@@ -1,0 +1,125 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: api-server
+  namespace: oidc-postgres-demo
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-server-config
+  namespace: oidc-postgres-demo
+data:
+  # Azure Entra ID configuration - UPDATE THESE VALUES
+  AZURE_TENANT_ID: "YOUR_TENANT_ID"
+  AZURE_CLIENT_ID: "YOUR_CLIENT_ID"
+  # PostgreSQL configuration
+  DB_HOST: "postgresql"
+  DB_PORT: "5432"
+  DB_NAME: "demo"
+  DB_USER: "apiserver"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: api-server-secrets
+  namespace: oidc-postgres-demo
+type: Opaque
+stringData:
+  DB_PASSWORD: "apiserver-secret-password"
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: api-server
+  namespace: oidc-postgres-demo
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: api-server
+  namespace: oidc-postgres-demo
+spec:
+  source:
+    type: Binary
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Dockerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: api-server:latest
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-server
+  namespace: oidc-postgres-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api-server
+  template:
+    metadata:
+      labels:
+        app: api-server
+    spec:
+      serviceAccountName: api-server
+      containers:
+        - name: api-server
+          image: image-registry.openshift-image-registry.svc:5000/oidc-postgres-demo/api-server:latest
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: api-server-config
+            - secretRef:
+                name: api-server-secrets
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-server
+  namespace: oidc-postgres-demo
+spec:
+  ports:
+    - port: 8080
+      targetPort: 8080
+  selector:
+    app: api-server
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: api-server
+  namespace: oidc-postgres-demo
+spec:
+  to:
+    kind: Service
+    name: api-server
+  port:
+    targetPort: 8080
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
