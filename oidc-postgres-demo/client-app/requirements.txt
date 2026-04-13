@@ -1,4 +1,5 @@
 Flask==3.0.0
 requests==2.31.0
-spiffe==0.7.2
+spiffe==0.2.6
 psycopg2-binary==2.9.9
+PyJWT[crypto]==2.8.0

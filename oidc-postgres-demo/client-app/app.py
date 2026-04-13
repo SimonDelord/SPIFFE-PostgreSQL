@@ -2,14 +2,17 @@
 SPIFFE-enabled Client App that:
 1. Gets JWT-SVID from SPIRE
 2. Exchanges JWT-SVID for Entra ID token via Workload Identity Federation
-3. Connects to PostgreSQL 18 using the Entra ID token for authentication
+3. Validates the Entra ID token and extracts identity
+4. Connects to PostgreSQL using identity-based authentication
 
-This demonstrates the full flow: SPIFFE → Entra ID → PostgreSQL 18 (OIDC)
+This demonstrates the full flow: SPIFFE → Entra ID → PostgreSQL (Identity Federation)
 """
 
 import os
 import json
 import logging
+import base64
+import hashlib
 from datetime import datetime
 
 from flask import Flask, render_template_string, jsonify
@@ -17,6 +20,7 @@ import requests
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from spiffe import WorkloadApiClient
+import jwt
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -37,7 +41,46 @@ AZURE_TOKEN_ENDPOINT = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/oau
 DB_HOST = os.environ.get('DB_HOST', 'postgresql')
 DB_PORT = os.environ.get('DB_PORT', '5432')
 DB_NAME = os.environ.get('DB_NAME', 'demo')
-DB_USER = os.environ.get('DB_USER', 'spiffe-client')  # Entra ID app name
+DB_ADMIN_USER = os.environ.get('DB_ADMIN_USER', 'postgres')
+DB_ADMIN_PASSWORD = os.environ.get('DB_ADMIN_PASSWORD', 'postgres-admin-password')
+
+# Entra ID JWKS for token validation
+ENTRA_JWKS_URL = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/discovery/v2.0/keys" if AZURE_TENANT_ID else ''
+_jwks_client = None
+
+def get_jwks_client():
+    """Get or create JWKS client for Entra ID token validation."""
+    global _jwks_client
+    if _jwks_client is None and ENTRA_JWKS_URL:
+        _jwks_client = jwt.PyJWKClient(ENTRA_JWKS_URL)
+    return _jwks_client
+
+
+def decode_and_validate_entra_token(token):
+    """
+    Decode and validate an Entra ID access token.
+    Returns the token claims if valid.
+    """
+    try:
+        jwks_client = get_jwks_client()
+        if jwks_client:
+            signing_key = jwks_client.get_signing_key_from_jwt(token)
+            claims = jwt.decode(
+                token,
+                signing_key.key,
+                algorithms=["RS256"],
+                audience=AZURE_CLIENT_ID,
+                options={"verify_exp": True}
+            )
+        else:
+            claims = jwt.decode(token, options={"verify_signature": False})
+        return {'status': 'success', 'claims': claims}
+    except jwt.ExpiredSignatureError:
+        return {'status': 'error', 'error': 'Token has expired'}
+    except jwt.InvalidAudienceError:
+        return {'status': 'error', 'error': 'Invalid token audience'}
+    except Exception as e:
+        return {'status': 'error', 'error': f'Token validation failed: {str(e)}'}
 
 # HTML template for the UI
 HTML_TEMPLATE = '''
@@ -306,18 +349,78 @@ def exchange_jwt_svid_for_entra_token(jwt_svid_token):
 
 def query_database_with_token(entra_token):
     """
-    Connect to PostgreSQL 18 using the Entra ID token and query data.
+    Connect to PostgreSQL using identity from the validated Entra ID token.
     
-    PostgreSQL 18 with pg_oidc_validator validates the token against Entra ID.
+    Flow:
+    1. Validate and decode the Entra ID token
+    2. Extract the identity (appid/oid)
+    3. Ensure PostgreSQL user exists for this identity
+    4. Connect and query using identity-based authentication
     """
+    # Step 1: Validate and decode the token
+    validation = decode_and_validate_entra_token(entra_token)
+    if validation['status'] != 'success':
+        return {
+            'status': 'error',
+            'error': f'Token validation failed: {validation.get("error")}',
+            'step': 'Token Validation'
+        }
+    
+    claims = validation['claims']
+    
+    # Step 2: Extract identity from token claims
+    app_id = claims.get('appid') or claims.get('azp') or claims.get('sub')
+    object_id = claims.get('oid')
+    issuer = claims.get('iss', 'unknown')
+    
+    # Create a deterministic username from the app identity (max 63 chars for PG)
+    identity_hash = hashlib.sha256(app_id.encode()).hexdigest()[:16]
+    db_username = f"oidc_{identity_hash}"
+    db_password = hashlib.sha256(f"{app_id}:{object_id}".encode()).hexdigest()
+    
     try:
-        # Connect to PostgreSQL using the Entra ID token as the password
+        # Step 3: Connect as admin and ensure user exists
+        admin_conn = psycopg2.connect(
+            host=DB_HOST,
+            port=DB_PORT,
+            database=DB_NAME,
+            user=DB_ADMIN_USER,
+            password=DB_ADMIN_PASSWORD,
+            sslmode='prefer',
+            connect_timeout=10
+        )
+        admin_conn.autocommit = True
+        admin_cursor = admin_conn.cursor()
+        
+        # Create user if not exists (idempotent)
+        admin_cursor.execute(
+            f"SELECT 1 FROM pg_roles WHERE rolname = %s", (db_username,)
+        )
+        if not admin_cursor.fetchone():
+            admin_cursor.execute(
+                f"CREATE USER {db_username} WITH PASSWORD %s", (db_password,)
+            )
+            admin_cursor.execute(
+                f"GRANT SELECT ON products TO {db_username}"
+            )
+            admin_cursor.execute(
+                f"GRANT ALL ON access_log TO {db_username}"
+            )
+            admin_cursor.execute(
+                f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {db_username}"
+            )
+            logger.info(f"Created PostgreSQL user: {db_username} for identity: {app_id}")
+        
+        admin_cursor.close()
+        admin_conn.close()
+        
+        # Step 4: Connect as the identity-based user
         conn = psycopg2.connect(
             host=DB_HOST,
             port=DB_PORT,
             database=DB_NAME,
-            user=DB_USER,
-            password=entra_token,
+            user=db_username,
+            password=db_password,
             sslmode='prefer',
             connect_timeout=10
         )
@@ -328,10 +431,10 @@ def query_database_with_token(entra_token):
         cursor.execute('SELECT * FROM products ORDER BY id')
         products = cursor.fetchall()
         
-        # Log the access
+        # Log the access with full identity info
         cursor.execute(
             "INSERT INTO access_log (subject, issuer, action) VALUES (%s, %s, %s)",
-            (DB_USER, 'entra-id', 'SELECT products')
+            (f"appid:{app_id}", issuer, 'SELECT products')
         )
         conn.commit()
         
@@ -340,8 +443,14 @@ def query_database_with_token(entra_token):
         
         return {
             'status': 'success',
-            'message': 'Successfully connected to PostgreSQL 18 with Entra ID token!',
-            'authentication_method': 'OIDC (pg_oidc_validator)',
+            'message': 'Successfully authenticated with Entra ID identity!',
+            'authentication_flow': 'SPIFFE → Entra ID → PostgreSQL (Identity Federation)',
+            'identity': {
+                'app_id': app_id,
+                'object_id': object_id,
+                'issuer': issuer,
+                'db_username': db_username
+            },
             'products': [dict(p) for p in products],
             'product_count': len(products)
         }
@@ -350,9 +459,10 @@ def query_database_with_token(entra_token):
         return {
             'status': 'error',
             'error': f'PostgreSQL connection failed: {str(e)}',
-            'hint': 'Ensure PostgreSQL 18 is configured with pg_oidc_validator and Entra ID settings'
+            'hint': 'Check PostgreSQL connectivity and credentials'
         }
     except Exception as e:
+        logger.exception("Database error")
         return {
             'status': 'error',
             'error': f'Database error: {str(e)}'

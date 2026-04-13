@@ -12,16 +12,6 @@ stringData:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: postgresql-config
-  namespace: oidc-postgres-demo
-data:
-  # Azure Entra ID configuration - UPDATE THESE VALUES
-  AZURE_TENANT_ID: "YOUR_TENANT_ID"
-  AZURE_CLIENT_ID: "YOUR_CLIENT_ID"
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
   name: postgresql-init
   namespace: oidc-postgres-demo
 data:
@@ -43,7 +33,7 @@ data:
         ('Device D', 'Smart device with IoT connectivity', 199.99),
         ('Component E', 'Essential component for your projects', 9.99);
     
-    -- Create access log table to track OIDC-authenticated users
+    -- Create access log table to track authenticated users
     CREATE TABLE IF NOT EXISTS access_log (
         id SERIAL PRIMARY KEY,
         subject VARCHAR(255) NOT NULL,
@@ -52,36 +42,11 @@ data:
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     
-    -- Grant permissions (will be used by OIDC-authenticated users)
-    GRANT SELECT ON products TO PUBLIC;
-    GRANT ALL ON access_log TO PUBLIC;
-    GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO PUBLIC;
-  
-  pg_hba_oidc.conf: |
-    # PostgreSQL Client Authentication Configuration for OIDC
-    # TYPE  DATABASE        USER            ADDRESS                 METHOD
-    
-    # Allow local connections with password (for admin)
-    local   all             postgres                                peer
-    host    all             postgres        127.0.0.1/32            scram-sha-256
-    host    all             postgres        ::1/128                 scram-sha-256
-    
-    # Allow OIDC authentication for all other users
-    # The 'oauth' method uses pg_oidc_validator to validate Entra ID tokens
-    host    all             all             0.0.0.0/0               oauth
-    host    all             all             ::/0                    oauth
-
-  postgresql_oidc.conf: |
-    # PostgreSQL OIDC Configuration
-    # These settings configure pg_oidc_validator for Microsoft Entra ID
-    
-    # Load the OIDC validator library
-    shared_preload_libraries = 'pg_oidc_validator'
-    
-    # OAuth/OIDC settings (will be overridden by environment variables)
-    # oauth.validator_library = 'pg_oidc_validator'
-    # oauth.issuer is set via AZURE_TENANT_ID environment variable
-    # oauth.client_id is set via AZURE_CLIENT_ID environment variable
+    -- Create a role for OIDC users
+    CREATE ROLE oidc_users;
+    GRANT SELECT ON products TO oidc_users;
+    GRANT ALL ON access_log TO oidc_users;
+    GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO oidc_users;
 ---
 apiVersion: v1
 kind: Service
@@ -113,9 +78,6 @@ spec:
     spec:
       containers:
         - name: postgresql
-          # PostgreSQL 18 with pg_oidc_validator
-          # Note: As of early 2026, you may need to build a custom image or use
-          # a community image that includes pg_oidc_validator
           image: postgres:18
           ports:
             - containerPort: 5432
@@ -137,24 +99,19 @@ spec:
                 secretKeyRef:
                   name: postgresql-credentials
                   key: POSTGRES_DB
-            # Entra ID configuration for pg_oidc_validator
-            - name: AZURE_TENANT_ID
-              valueFrom:
-                configMapKeyRef:
-                  name: postgresql-config
-                  key: AZURE_TENANT_ID
-            - name: AZURE_CLIENT_ID
-              valueFrom:
-                configMapKeyRef:
-                  name: postgresql-config
-                  key: AZURE_CLIENT_ID
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
           volumeMounts:
             - name: postgresql-data
               mountPath: /var/lib/postgresql/data
             - name: init-scripts
               mountPath: /docker-entrypoint-initdb.d
-            - name: config
-              mountPath: /etc/postgresql/conf.d
           resources:
             requests:
               memory: "256Mi"
@@ -185,14 +142,6 @@ spec:
             items:
               - key: init.sql
                 path: init.sql
-        - name: config
-          configMap:
-            name: postgresql-init
-            items:
-              - key: pg_hba_oidc.conf
-                path: pg_hba.conf
-              - key: postgresql_oidc.conf
-                path: postgresql.conf
   volumeClaimTemplates:
     - metadata:
         name: postgresql-data

@@ -14,10 +14,11 @@ data:
   AZURE_TENANT_ID: "YOUR_TENANT_ID"
   AZURE_CLIENT_ID: "YOUR_CLIENT_ID"
   # PostgreSQL configuration
-  DB_HOST: "postgresql"
+  DB_HOST: "postgresql.oidc-postgres-demo.svc.cluster.local"
   DB_PORT: "5432"
   DB_NAME: "demo"
-  DB_USER: "spiffe-client"
+  DB_ADMIN_USER: "postgres"
+  DB_ADMIN_PASSWORD: "postgres-admin-password"
 ---
 apiVersion: image.openshift.io/v1
 kind: ImageStream
