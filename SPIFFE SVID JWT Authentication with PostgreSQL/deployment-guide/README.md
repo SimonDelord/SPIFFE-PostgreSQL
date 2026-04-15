@@ -1,6 +1,34 @@
-# Deployment Guide: SPIFFE JWT-SVID Token Exchange Demo
+# Deployment Guides: SPIFFE JWT-SVID Authentication with PostgreSQL
 
-This guide provides step-by-step instructions to deploy the JWT-SVID Token Exchange demo on an OpenShift cluster.
+This folder contains deployment guides for the JWT-SVID to PostgreSQL demo.
+
+## Available Guides
+
+### 1. [Entra ID Setup Guide](./entra-id-setup.md) (Recommended)
+
+**Status: Active and Tested**
+
+Complete guide for deploying the demo with **Microsoft Entra ID** as the enterprise Identity Provider. This is the production-ready approach using Workload Identity Federation.
+
+**Features:**
+- Real enterprise IdP integration (Microsoft Entra ID)
+- Workload Identity Federation (no secrets stored)
+- Identity-based PostgreSQL authentication
+- Full audit trail of access
+
+### 2. Keycloak Setup Guide (Legacy)
+
+**Status: Deprecated - For Reference Only**
+
+The original guide below shows how to deploy with Keycloak as a mock enterprise IdP. This approach was experimental and has been superseded by the Entra ID integration.
+
+---
+
+# Legacy: Keycloak Deployment Guide
+
+> **Note:** This guide is kept for reference. For production use, please use the [Entra ID Setup Guide](./entra-id-setup.md).
+
+This guide provides step-by-step instructions to deploy the JWT-SVID Token Exchange demo on an OpenShift cluster using Keycloak.
 
 ## Table of Contents
 
