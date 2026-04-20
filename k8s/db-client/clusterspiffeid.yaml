@@ -3,6 +3,10 @@ kind: ClusterSPIFFEID
 metadata:
   name: db-client-workload
 spec:
+  # IMPORTANT: className must match the SPIRE controller class
+  # Without this, the default ClusterSPIFFEID takes precedence
+  className: zero-trust-workload-identity-manager-spire
+  
   # SPIFFE ID template - the identity issued to this workload
   spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}"
   
