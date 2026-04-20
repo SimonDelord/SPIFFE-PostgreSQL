@@ -707,21 +707,27 @@ curl -sk https://$APP_URL/api/certificate | jq .
 {
   "subject": {
     "countryName": "US",
-    "organizationName": "SPIRE"
+    "organizationName": "SPIRE",
+    "commonName": "app_readonly"
   },
-  "common_name": "N/A",
+  "common_name": "app_readonly",
+  "san_dns": [
+    "app_readonly"
+  ],
   "san_uris": [
-    "spiffe://apps.rosa.rosa-69t6c.hyq5.p3.openshiftapps.com/ns/spiffe-edb-demo/sa/db-client-app"
+    "spiffe://apps.rosa.rosa-v99n5.8ie9.p3.openshiftapps.com/ns/spiffe-edb-demo/sa/db-client-app"
   ],
   "issuer": {
     "commonName": "SPIRE Server CA",
     "countryName": "US",
-    "organizationName": "Red Hat Demo"
+    "organizationName": "My Organization"
   },
-  "not_valid_before": "2026-04-07T23:08:55",
-  "not_valid_after": "2026-04-08T00:09:05"
+  "not_valid_before": "2026-04-20T01:57:00",
+  "not_valid_after": "2026-04-20T02:57:10"
 }
 ```
+
+> **Note:** The `common_name` field is set via `dnsNameTemplates` in the `ClusterSPIFFEID`. PostgreSQL uses this CN as the database username when using the `cert` authentication method.
 
 ### Test 3: Test Database Connection
 
