@@ -417,6 +417,10 @@ kind: ClusterSPIFFEID
 metadata:
   name: db-client-workload
 spec:
+  # IMPORTANT: className must match the SPIRE controller class
+  # Without this, the default ClusterSPIFFEID takes precedence and dnsNameTemplates won't work
+  className: zero-trust-workload-identity-manager-spire
+  
   # SPIFFE ID template
   spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}"
   
@@ -429,6 +433,11 @@ spec:
   namespaceSelector:
     matchLabels:
       app.kubernetes.io/part-of: spiffe-demo
+  
+  # DNS names to include in the certificate - sets the CN (Common Name)
+  # PostgreSQL uses the CN as the username when using 'cert' authentication
+  dnsNameTemplates:
+    - "app_readonly"
   
   # Certificate TTL
   ttl: "1h"
@@ -842,9 +851,9 @@ https://db-client-app-spiffe-edb-demo.apps.rosa.rosa-69t6c.hyq5.p3.openshiftapps
 │   │  ✓ Certificate chain is valid                                        │   │
 │   │                                                                      │   │
 │   │  pg_hba.conf rule matched:                                           │   │
-│   │  hostssl all app_readonly 0.0.0.0/0 trust clientcert=verify-ca      │   │
+│   │  hostssl all all 0.0.0.0/0 cert                                     │   │
 │   │                                                                      │   │
-│   │  → Connection allowed as user "app_readonly"                         │   │
+│   │  → Extracts CN="app_readonly" from cert → Uses as PostgreSQL user   │   │
 │   └─────────────────────────────────────────────────────────────────────┘   │
 │                                                                              │
 │   5. AUTHORIZATION (Role-Based Permissions)                                 │
@@ -862,16 +871,17 @@ https://db-client-app-spiffe-edb-demo.apps.rosa.rosa-69t6c.hyq5.p3.openshiftapps
 
 ### Key Technical Points
 
-1. **SPIFFE Certificates Don't Have CN**: By default, SPIFFE X.509-SVIDs don't include a Common Name (CN). The identity is in the SAN (Subject Alternative Name) as a URI.
+1. **CN-Based Authentication**: Using `dnsNameTemplates` in `ClusterSPIFFEID`, we set the certificate's CN (Common Name) to the PostgreSQL username (e.g., `app_readonly`). PostgreSQL's `cert` auth method extracts this CN and uses it as the database user.
 
-2. **clientcert=verify-ca**: We use `clientcert=verify-ca` instead of `clientcert=verify-full` because PostgreSQL's `verify-full` tries to match the CN, which doesn't exist in SPIFFE certs.
+2. **The `cert` Authentication Method**: PostgreSQL's `cert` method:
+   - Verifies the certificate is signed by the trusted CA (SPIRE)
+   - Extracts the CN from the certificate
+   - Uses the CN as the PostgreSQL username
+   - Provides both **authentication** (valid cert) and **authorization** (CN maps to role)
 
-3. **Trust Authentication with Certificate Verification**: The combination of `trust` auth method with `clientcert=verify-ca` means:
-   - The certificate must be signed by the SPIRE CA (authentication)
-   - Once verified, the user specified in the connection string is trusted
-   - This is appropriate because any workload that can present a valid SPIRE certificate is already authenticated
+3. **ClusterSPIFFEID className**: The `className: zero-trust-workload-identity-manager-spire` field is required. Without it, the default ClusterSPIFFEID takes precedence and `dnsNameTemplates` won't be applied.
 
-4. **User Role Selection**: The client application specifies which PostgreSQL user to connect as (`app_readonly`). Different SPIFFE-enabled workloads could connect as different users based on their needs.
+4. **Role-Based Authorization**: Different workloads can have different `dnsNameTemplates` values (e.g., `app_readonly`, `app_readwrite`, `app_admin`), giving them different database permissions based on their SPIFFE identity configuration.
 
 ---
 
@@ -948,17 +958,28 @@ oc exec -n spiffe-edb-demo deploy/db-client-app -- env | grep DB
 
 4. **Role-Based Authorization**: Different permissions can be granted based on which user the SPIFFE workload connects as.
 
-### SPIFFE Certificate Challenge
+### Setting Certificate CN via ClusterSPIFFEID
 
-SPIFFE X.509-SVIDs don't include a CN (Common Name) by default. The identity is stored in the SAN URI:
+By default, SPIFFE X.509-SVIDs don't include a CN (Common Name). The identity is stored in the SAN URI:
 ```
 spiffe://trust-domain/ns/namespace/sa/serviceaccount
 ```
 
-PostgreSQL's traditional `cert` authentication method expects a CN for user mapping. Our workaround:
-- Use `clientcert=verify-ca` to verify the certificate is signed by SPIRE CA
-- Use `trust` authentication method (since certificate proves identity)
-- Specify the username in the connection string
+PostgreSQL's `cert` authentication method extracts the CN for user mapping. Our solution uses `dnsNameTemplates` in `ClusterSPIFFEID`:
+
+```yaml
+spec:
+  className: zero-trust-workload-identity-manager-spire  # Required!
+  dnsNameTemplates:
+    - "app_readonly"  # Sets CN and DNS SAN
+```
+
+This results in a certificate with:
+- **CN**: `app_readonly`
+- **DNS SAN**: `app_readonly`
+- **URI SAN**: `spiffe://trust-domain/ns/.../sa/...`
+
+PostgreSQL then uses the CN as the database username automatically.
 
 ### Production Considerations
 
