@@ -27,6 +27,9 @@ app = Flask(__name__)
 DB_HOST = os.environ.get('DB_HOST', 'edb-spiffe-postgres.edb.svc.cluster.local')
 DB_PORT = os.environ.get('DB_PORT', '5432')
 DB_NAME = os.environ.get('DB_NAME', 'appdb')
+# DB_USER is now extracted from the certificate CN by PostgreSQL's 'cert' auth method
+# The CN is set via ClusterSPIFFEID's dnsNameTemplates field
+# Reference: https://gitea.jamma.life/jmhbnz/talks/src/branch/main/2026-04-03-openshift-ztwim
 DB_USER = os.environ.get('DB_USER', 'app_readonly')
 DB_SSLMODE = os.environ.get('DB_SSLMODE', 'require')
 SPIFFE_ENDPOINT_SOCKET = os.environ.get('SPIFFE_ENDPOINT_SOCKET', 'unix:///spiffe-workload-api/spire-agent.sock')
@@ -185,7 +188,7 @@ HTML_TEMPLATE = '''
     </div>
 
     <div class="card">
-        <h2>📊 Authentication Flow</h2>
+        <h2>📊 Authentication &amp; Authorization Flow</h2>
         <div class="flow-diagram">
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
 │  This App       │     │  SPIRE Agent    │     │    PostgreSQL   │
@@ -195,35 +198,41 @@ HTML_TEMPLATE = '''
          │  1. Request X.509-SVID                        │
          │ ─────────────────────►│                       │
          │                       │                       │
-         │  2. Return Certificate (with SAN URI)         │
+         │  2. Return Certificate with:                  │
+         │     - CN = "app_readonly" (from dnsNameTemplates)
+         │     - SAN = spiffe://trust-domain/ns/.../sa/...
          │ ◄─────────────────────│                       │
-         │    spiffe://trust-domain/ns/.../sa/...        │
          │                       │                       │
-         │  3. TLS + Connect(user="app_readonly",        │
-         │     sslcert=svid.pem, sslkey=key.pem)         │
+         │  3. mTLS Connect (cert has CN="app_readonly") │
          │ ─────────────────────────────────────────────►│
          │                       │                       │
          │                       │    4. Verify cert     │
          │                       │       signed by       │
          │                       │       SPIRE CA ✓      │
+         │                       │       (AUTHENTICATION)│
          │                       │                       │
          │                       │    5. pg_hba.conf:    │
-         │                       │       clientcert=     │
-         │                       │       verify-ca ✓     │
+         │                       │       method = cert   │
+         │                       │       Extract CN ✓    │
          │                       │                       │
-         │                       │    6. Trust user      │
-         │                       │       "app_readonly"  │
-         │                       │       from conn string│
+         │                       │    6. CN="app_readonly"
+         │                       │       maps to PG role │
+         │                       │       with specific   │
+         │                       │       permissions     │
+         │                       │       (AUTHORIZATION) │
          │                       │                       │
          │  7. Connection established as "app_readonly"  │
          │ ◄─────────────────────────────────────────────│
          │                       │                       │
         </div>
         <div class="info-box">
-            <strong>Note:</strong> SPIFFE certificates don't have a CN (Common Name). 
-            Identity is in the SAN (Subject Alternative Name) as a URI. 
-            PostgreSQL verifies the cert is signed by SPIRE CA, then trusts the 
-            username provided in the connection string.
+            <strong>How it works:</strong> The ClusterSPIFFEID's <code>dnsNameTemplates</code> 
+            field sets the certificate CN (Common Name) to the PostgreSQL username. 
+            PostgreSQL's <code>cert</code> auth method extracts the CN from the certificate 
+            and uses it as the username. This provides both authentication (valid SPIRE-signed cert) 
+            AND authorization (CN maps to a PostgreSQL role with specific permissions).
+            <br><br>
+            <strong>Reference:</strong> <a href="https://gitea.jamma.life/jmhbnz/talks/src/branch/main/2026-04-03-openshift-ztwim" target="_blank">jmhbnz/talks - OpenShift ZTWIM Demo</a>
         </div>
     </div>
 

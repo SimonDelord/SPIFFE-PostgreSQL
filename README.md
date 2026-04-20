@@ -1,6 +1,8 @@
 # SPIFFE X.509 Certificate Authentication with PostgreSQL
 
-This demo shows how a **SPIFFE-enabled application** uses its **X.509-SVID** (certificate) to authenticate to a **PostgreSQL database**, with the database performing both **authentication** (certificate verification) and **authorization** (role-based permissions).
+This demo shows how a **SPIFFE-enabled application** uses its **X.509-SVID** (certificate) to authenticate to a **PostgreSQL database**, with the database performing both **authentication** (certificate verification) and **authorization** (role-based permissions via certificate CN extraction).
+
+> **Acknowledgment:** The certificate CN-based authorization approach used in this demo is based on the excellent work by [jmhbnz](https://gitea.jamma.life/jmhbnz/talks/src/branch/main/2026-04-03-openshift-ztwim).
 
 ---
 
@@ -20,6 +22,7 @@ This demo shows how a **SPIFFE-enabled application** uses its **X.509-SVID** (ce
 **See also:**
 - [SPIRE Setup Guide](spire-setup/README.md) - How to install and configure SPIRE via the Zero Trust Workload Identity Manager Operator.
 - [Certificate Rotation Use Case](certificate-rotation-use-case/README.md) - How to configure SPIRE as an intermediate CA to solve CA rotation challenges.
+- [Root CA Setup](root-ca-setup/README.md) - How to extend SPIRE CA validity to reduce rotation frequency.
 - [JWT-SVID Authentication with Enterprise IdP](SPIFFE%20SVID%20JWT%20Authentication%20with%20PostgreSQL/README.md) - How SPIFFE-enabled workloads can authenticate to OIDC-only services via Workload Identity Federation (Entra ID, AWS, GCP).
 
 ---
@@ -123,7 +126,8 @@ This demo shows how a **SPIFFE-enabled application** uses its **X.509-SVID** (ce
 │  │  │                                                              │    │    │
 │  │  │  • Server TLS certificate (OpenShift Service CA)            │    │    │
 │  │  │  • Client CA = SPIRE CA bundle (trusts SPIFFE certs)        │    │    │
-│  │  │  • pg_hba.conf: hostssl with clientcert=verify-ca           │    │    │
+│  │  │  • pg_hba.conf: hostssl with method=cert                    │    │    │
+│  │  │  • Extracts CN from cert → Uses as PostgreSQL username      │    │    │
 │  │  │  • Roles: app_readonly, app_readwrite, app_admin            │    │    │
 │  │  │                                                              │    │    │
 │  │  └─────────────────────────────────────────────────────────────┘    │    │
@@ -217,17 +221,25 @@ ssl_min_protocol_version = 'TLSv1.2'
 
 **Key Configuration - `pg_hba.conf`:**
 ```
-# TYPE  DATABASE  USER          ADDRESS       METHOD    OPTIONS
+# TYPE  DATABASE  USER          ADDRESS       METHOD
 
 # Local admin access
 local   all       postgres                    trust
+host    all       postgres      127.0.0.1/32  trust
 
-# SPIFFE certificate authentication
-# verify-ca = verify cert is signed by trusted CA (SPIRE)
-# trust = allow connection if cert is valid (no password)
-hostssl all       app_readonly  0.0.0.0/0     trust     clientcert=verify-ca
-hostssl all       app_readwrite 0.0.0.0/0     trust     clientcert=verify-ca
-hostssl all       app_admin     0.0.0.0/0     trust     clientcert=verify-ca
+# SPIFFE certificate authentication using 'cert' method
+# The 'cert' method:
+# 1. Verifies the client certificate is signed by the trusted CA (SPIRE)
+# 2. Extracts the CN (Common Name) from the certificate
+# 3. Uses the CN as the PostgreSQL username
+# 
+# The ClusterSPIFFEID's dnsNameTemplates field sets the certificate CN.
+# For example: dnsNameTemplates: ["app_readonly"] creates a cert with CN=app_readonly
+# Reference: https://gitea.jamma.life/jmhbnz/talks/src/branch/main/2026-04-03-openshift-ztwim
+hostssl all       all           0.0.0.0/0     cert
+
+# Reject non-SSL connections
+hostnossl all     all           0.0.0.0/0     reject
 
 # Password auth for admin
 hostssl all       postgres      0.0.0.0/0     scram-sha-256

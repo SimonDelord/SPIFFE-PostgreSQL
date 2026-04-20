@@ -16,9 +16,12 @@ spec:
     matchLabels:
       app.kubernetes.io/part-of: spiffe-demo
   
-  # DNS names to include in the certificate (optional)
+  # DNS names to include in the certificate
+  # IMPORTANT: This sets both the DNS SAN and the CN (Common Name)
+  # PostgreSQL uses the CN as the username when using 'cert' authentication
+  # Reference: https://gitea.jamma.life/jmhbnz/talks/src/branch/main/2026-04-03-openshift-ztwim
   dnsNameTemplates:
-    - "{{ .PodMeta.Name }}.{{ .PodMeta.Namespace }}.svc.cluster.local"
+    - "app_readonly"
   
   # TTL for the SVID
   ttl: "1h"

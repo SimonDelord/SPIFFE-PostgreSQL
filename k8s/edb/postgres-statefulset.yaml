@@ -27,22 +27,29 @@ data:
     log_filename = 'postgresql-%Y-%m-%d.log'
   
   # Client authentication configuration
+  # Reference: https://gitea.jamma.life/jmhbnz/talks/src/branch/main/2026-04-03-openshift-ztwim
   pg_hba.conf: |
-    # TYPE  DATABASE  USER        ADDRESS       METHOD    OPTIONS
+    # TYPE  DATABASE  USER        ADDRESS       METHOD
     
     # Local connections (admin)
     local   all       postgres                  trust
+    host    all       postgres      127.0.0.1/32 trust
     
-    # SPIFFE certificate authentication - verify cert is signed by SPIRE CA
-    # Using trust auth since SPIFFE certs don't have CN field
-    # The certificate verification proves workload identity
-    hostssl all       app_readonly  0.0.0.0/0   trust     clientcert=verify-ca
-    hostssl all       app_readwrite 0.0.0.0/0   trust     clientcert=verify-ca
-    hostssl all       app_admin     0.0.0.0/0   trust     clientcert=verify-ca
+    # SPIFFE certificate authentication using 'cert' method
+    # The 'cert' method extracts the CN (Common Name) from the client certificate
+    # and uses it as the PostgreSQL username automatically.
+    # 
+    # With ClusterSPIFFEID configured with dnsNameTemplates: ["app_readonly"],
+    # the certificate CN will be "app_readonly", which PostgreSQL uses as the username.
+    # This provides both AUTHENTICATION (valid cert from SPIRE CA) and 
+    # AUTHORIZATION (CN maps to a PostgreSQL role with specific permissions).
+    hostssl all       all           0.0.0.0/0   cert
+    
+    # Reject non-SSL connections
+    hostnossl all     all           0.0.0.0/0   reject
     
     # Fallback password auth for admin/testing
     hostssl all       postgres      0.0.0.0/0   scram-sha-256
-    host    all       postgres      127.0.0.1/32 trust
   
   # Identity mapping for certificate-based auth
   pg_ident.conf: |

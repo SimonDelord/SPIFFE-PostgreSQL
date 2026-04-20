@@ -317,6 +317,16 @@ def exchange_jwt_svid_for_entra_token(jwt_svid_token):
             'scope': f'{AZURE_CLIENT_ID}/.default'
         }
         
+        logger.info("=" * 60)
+        logger.info("ENTRA ID TOKEN EXCHANGE REQUEST")
+        logger.info("=" * 60)
+        logger.info(f"  Endpoint: {AZURE_TOKEN_ENDPOINT}")
+        logger.info(f"  Client ID: {AZURE_CLIENT_ID}")
+        logger.info(f"  Grant Type: client_credentials")
+        logger.info(f"  Assertion Type: jwt-bearer (JWT-SVID)")
+        logger.info(f"  JWT-SVID Preview: {jwt_svid_token[:80]}...")
+        logger.info("-" * 60)
+        
         response = requests.post(
             AZURE_TOKEN_ENDPOINT,
             data=data,
@@ -324,16 +334,31 @@ def exchange_jwt_svid_for_entra_token(jwt_svid_token):
             timeout=30
         )
         
+        logger.info("ENTRA ID TOKEN EXCHANGE RESPONSE")
+        logger.info("-" * 60)
+        logger.info(f"  Status Code: {response.status_code}")
+        logger.info(f"  Response Time: {response.elapsed.total_seconds():.3f}s")
+        
         if response.status_code == 200:
             token_data = response.json()
+            logger.info(f"  Token Type: {token_data.get('token_type')}")
+            logger.info(f"  Expires In: {token_data.get('expires_in')} seconds")
+            logger.info(f"  Token Preview: {token_data.get('access_token', '')[:50]}...")
+            logger.info("  SUCCESS: Entra ID validated the JWT-SVID and issued an access token!")
+            logger.info("  (Entra ID fetched JWKS from SPIRE OIDC Discovery Provider to validate)")
+            logger.info("=" * 60)
             return {
                 'status': 'success',
                 'access_token': token_data.get('access_token'),
                 'token_type': token_data.get('token_type'),
                 'expires_in': token_data.get('expires_in'),
-                'token_preview': token_data.get('access_token', '')[:50] + '...'
+                'token_preview': token_data.get('access_token', '')[:50] + '...',
+                'entra_endpoint': AZURE_TOKEN_ENDPOINT,
+                'response_time_ms': int(response.elapsed.total_seconds() * 1000)
             }
         else:
+            logger.error(f"  FAILED: {response.text}")
+            logger.info("=" * 60)
             return {
                 'status': 'error',
                 'error': f'Token exchange failed: {response.status_code}',
@@ -341,6 +366,7 @@ def exchange_jwt_svid_for_entra_token(jwt_svid_token):
             }
             
     except Exception as e:
+        logger.exception("Token exchange error")
         return {
             'status': 'error',
             'error': f'Token exchange error: {str(e)}'
