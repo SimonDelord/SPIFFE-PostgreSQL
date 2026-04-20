@@ -1,0 +1,201 @@
+# PostgreSQL 18 with native OIDC authentication via pg_oidc_validator
+# This enables PostgreSQL to directly validate Entra ID tokens
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-oidc-config
+  namespace: oidc-postgres-demo
+data:
+  # PostgreSQL main configuration
+  postgresql.conf: |
+    # Listen on all interfaces
+    listen_addresses = '*'
+    port = 5432
+    
+    # Logging
+    log_statement = 'all'
+    log_connections = on
+    log_disconnections = on
+    
+    # SSL Configuration (required for OAuth)
+    ssl = on
+    ssl_cert_file = '/var/lib/postgresql/server-certs/tls.crt'
+    ssl_key_file = '/var/lib/postgresql/server-certs/tls.key'
+    
+    # OIDC Validator Configuration
+    # Load the Percona pg_oidc_validator library
+    oauth_validator_libraries = 'pg_oidc_validator'
+    
+    # Use 'unique_name' or 'upn' for Entra ID (email-like identifier)
+    pg_oidc_validator.authn_field = unique_name
+
+  # Client authentication configuration
+  # Configure OAuth authentication with Entra ID
+  pg_hba.conf: |
+    # TYPE  DATABASE  USER        ADDRESS       METHOD
+    
+    # Local admin access
+    local   all       postgres                  trust
+    host    all       postgres    127.0.0.1/32  trust
+    
+    # OAuth authentication via Entra ID
+    # The oauth method triggers PostgreSQL 18's native OIDC flow
+    # issuer = Entra ID OIDC endpoint
+    # scope = Custom scope created in Entra ID App Registration
+    # map = Identity mapping from pg_ident.conf
+    hostssl demo      oidc_users  0.0.0.0/0     oauth issuer=https://login.microsoftonline.com/64dc69e4-d083-49fc-9569-ebece1dd1408/v2.0 scope=api://f63d6f2e-f780-4568-a69a-93a07cd8c5db/.default map=oidc
+    
+    # Fallback password auth for admin
+    hostssl all       postgres    0.0.0.0/0     scram-sha-256
+    
+    # Reject non-SSL
+    hostnossl all     all         0.0.0.0/0     reject
+
+  # Identity mapping - maps OIDC identity to PostgreSQL role
+  pg_ident.conf: |
+    # MAPNAME   SYSTEM-USERNAME              DATABASE-USERNAME
+    # Map any user from redhat0.onmicrosoft.com domain to oidc_users role
+    oidc        /^(.*)@redhat0.onmicrosoft.com$    oidc_users
+    # Also map service principal identities (appid format)
+    oidc        /^(.*)$                            oidc_users
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-oidc-password
+  namespace: oidc-postgres-demo
+type: Opaque
+stringData:
+  POSTGRES_PASSWORD: "postgres-admin-password"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-oidc
+  namespace: oidc-postgres-demo
+  annotations:
+    # OpenShift auto-generates TLS certificate for this service
+    service.beta.openshift.io/serving-cert-secret-name: postgres-oidc-server-tls
+spec:
+  selector:
+    app: postgres-oidc
+  ports:
+    - port: 5432
+      targetPort: 5432
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-oidc-data
+  namespace: oidc-postgres-demo
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: postgres-oidc
+  namespace: oidc-postgres-demo
+
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: postgres-oidc
+  namespace: oidc-postgres-demo
+spec:
+  source:
+    type: Binary
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Dockerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: postgres-oidc:latest
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-oidc
+  namespace: oidc-postgres-demo
+spec:
+  serviceName: postgres-oidc
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-oidc
+  template:
+    metadata:
+      labels:
+        app: postgres-oidc
+    spec:
+      serviceAccountName: default
+      securityContext:
+        fsGroup: 999
+      containers:
+        - name: postgres
+          image: image-registry.openshift-image-registry.svc:5000/oidc-postgres-demo/postgres-oidc:latest
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-oidc-password
+                  key: POSTGRES_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: config
+              mountPath: /etc/postgresql/conf.d
+            - name: server-tls
+              mountPath: /var/lib/postgresql/server-certs
+              readOnly: true
+          args:
+            - "-c"
+            - "config_file=/etc/postgresql/conf.d/postgresql.conf"
+            - "-c"
+            - "hba_file=/etc/postgresql/conf.d/pg_hba.conf"
+            - "-c"
+            - "ident_file=/etc/postgresql/conf.d/pg_ident.conf"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+      volumes:
+        - name: config
+          configMap:
+            name: postgres-oidc-config
+        - name: server-tls
+          secret:
+            secretName: postgres-oidc-server-tls
+            defaultMode: 0640
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-oidc-data

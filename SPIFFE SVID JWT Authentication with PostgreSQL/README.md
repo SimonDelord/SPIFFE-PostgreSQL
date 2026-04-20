@@ -8,6 +8,9 @@ This demo shows how a **SPIFFE-enabled workload** can authenticate to **PostgreS
 - [The Problem](#the-problem)
 - [The Solution: Workload Identity Federation](#the-solution-workload-identity-federation)
 - [Architecture](#architecture)
+- [Implementation Options](#implementation-options)
+  - [Option A: Client-Side Token Validation](#option-a-client-side-token-validation)
+  - [Option B: PostgreSQL-Native JWT Validation (pgjwt)](#option-b-postgresql-native-jwt-validation-pgjwt)
 - [How It Works](#how-it-works)
 - [Live Demo Results](#live-demo-results)
 - [Prerequisites](#prerequisites)
@@ -131,8 +134,132 @@ This demo demonstrates how **SPIFFE-enabled workloads** running on OpenShift can
 | 3 | Client | Entra ID | Client exchanges JWT-SVID for Entra ID token |
 | 4 | Entra ID | SPIRE OIDC DP | Entra ID fetches JWKS to validate JWT-SVID |
 | 5 | Entra ID | Client | Entra ID issues access token |
-| 6 | Client | PostgreSQL | Client validates token, extracts identity, connects with identity-based user |
+| 6 | Client | PostgreSQL | Client passes token, PostgreSQL validates and applies authorization |
 | 7 | PostgreSQL | Client | Connection established, queries executed |
+
+---
+
+## Implementation Options
+
+We provide two implementations for validating Entra ID tokens:
+
+### Option A: Client-Side Token Validation
+
+**Location:** `oidc-postgres-demo/client-app/`
+
+The client application validates the Entra ID token, extracts identity claims, and dynamically creates PostgreSQL users.
+
+```
+Client App → Validates Entra ID token → Creates PostgreSQL user → Connects
+```
+
+**Pros:**
+- Simple PostgreSQL setup (standard PostgreSQL)
+- Full control over user provisioning logic
+
+**Cons:**
+- Token validation happens outside the database
+- Client needs admin access to create users
+
+### Option B: PostgreSQL-Native JWT Validation (pgjwt)
+
+**Location:** `oidc-postgres-demo/postgres-jwt/` and `oidc-postgres-demo/client-app-jwt/`
+
+PostgreSQL validates the Entra ID token directly using the `pgjwt` extension and applies Row-Level Security (RLS) for authorization.
+
+```
+Client App → Passes token to PostgreSQL → PostgreSQL validates via pgjwt → RLS applied
+```
+
+**Architecture:**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│          POSTGRESQL VALIDATES ENTRA ID TOKEN & PROVIDES AUTHORIZATION                   │
+├─────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                         │
+│  ┌──────────────┐     ┌─────────────────────────────┐     ┌──────────────┐             │
+│  │   SPIFFE     │     │        SPIRE Server         │     │   Entra ID   │             │
+│  │   Client     │     │  ┌───────────────────────┐  │     │  (Azure AD)  │             │
+│  │  (this app)  │     │  │  SPIRE OIDC Discovery │  │     │              │             │
+│  │              │     │  │  Provider             │  │     │              │             │
+│  └──────┬───────┘     │  └───────────┬───────────┘  │     └──────┬───────┘             │
+│         │             └──────────────┼──────────────┘            │                     │
+│         │                            │                           │  ┌───────────────┐  │
+│         │                            │                           │  │ PostgreSQL    │  │
+│         │                            │                           │  │ + pgjwt       │  │
+│         │                            │                           │  │ + RLS         │  │
+│         │                            │                           │  └───────┬───────┘  │
+│         │                            │                           │          │          │
+│    1.   │ Get JWT-SVID ─────────────►│                           │          │          │
+│    2.   │ Exchange JWT-SVID ─────────────────────────────────────►          │          │
+│    3.   │                            │◄──────────────────────────│ Validate │          │
+│         │◄───────────────────────────────────────────────────────│ JWT-SVID │          │
+│         │                Entra ID Access Token                   │          │          │
+│    4.   │ Connect to PostgreSQL ─────────────────────────────────────────────►         │
+│         │ SELECT set_session_token('entra-id-token')             │          │          │
+│    5.   │                                                        │◄─────────│ pgjwt    │
+│         │                                                        │ decodes  │ validates│
+│         │                                                        │ & checks │ token    │
+│    6.   │ SELECT * FROM products (RLS applied!) ─────────────────────────────►         │
+│         │◄────────────────────────────────────────────────────────────────────         │
+│         │                       Filtered results based on token  │          │          │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Pros:**
+- Token validation happens at the database layer
+- Native Row-Level Security for fine-grained authorization
+- No need for client to have admin access
+- Better security posture (database-enforced policies)
+
+**Cons:**
+- Requires custom PostgreSQL image with pgjwt extension
+- More complex PostgreSQL configuration
+
+**Live Demo Result (Option B):**
+
+```json
+{
+  "overall_status": "success",
+  "summary": {
+    "spiffe_id": "spiffe://apps.rosa.rosa-v99n5.8ie9.p3.openshiftapps.com/ns/oidc-postgres-demo/sa/jwt-client-app-sa",
+    "token_validated_by": "PostgreSQL (pgjwt)",
+    "authorization_method": "Row-Level Security",
+    "products_retrieved": 5
+  },
+  "steps": [
+    {
+      "step": "1",
+      "name": "Get JWT-SVID from SPIRE",
+      "result": { "status": "success", "spiffe_id": "..." }
+    },
+    {
+      "step": "2-3",
+      "name": "Exchange JWT-SVID for Entra ID token",
+      "result": { "status": "success", "expires_in": 3598 }
+    },
+    {
+      "step": "4-6",
+      "name": "PostgreSQL validates token & query with RLS",
+      "result": {
+        "status": "success",
+        "message": "Token validated by PostgreSQL, RLS applied!",
+        "token_validation": {
+          "validated_by": "PostgreSQL (pgjwt)",
+          "token_appid": "f63d6f2e-f780-4568-a69a-93a07cd8c5db",
+          "token_issuer": "https://sts.windows.net/64dc69e4-d083-49fc-9569-ebece1dd1408/"
+        },
+        "authorization": {
+          "method": "Row-Level Security (RLS)",
+          "policy": "is_token_validated() must be true"
+        },
+        "product_count": 5
+      }
+    }
+  ]
+}
+```
 
 ---
 
@@ -360,7 +487,7 @@ oc start-build client-app --from-dir=. -n oidc-postgres-demo --follow
 oc apply -f ../k8s/client-app.yaml
 ```
 
-### 3. Test the Demo
+### 3. Test the Demo (Option A)
 
 Access the demo UI:
 ```
@@ -372,6 +499,44 @@ Or via curl:
 curl -sk https://client-app-oidc-postgres-demo.apps.your-cluster.example.com/api/full-demo | jq .
 ```
 
+### 4. Deploy Option B (PostgreSQL pgjwt)
+
+For PostgreSQL-native JWT validation:
+
+```bash
+# Build and deploy PostgreSQL with pgjwt
+cd ../oidc-postgres-demo/postgres-jwt
+oc apply -f k8s-manifests.yaml
+oc start-build postgres-jwt --from-dir=. -n oidc-postgres-demo --follow
+
+# Build and deploy the client app for pgjwt demo
+cd ../client-app-jwt
+oc apply -f k8s-manifests.yaml
+oc start-build jwt-client-app --from-dir=. -n oidc-postgres-demo --follow
+
+# Add federated credential for the new service account
+az ad app federated-credential create \
+  --id $APP_ID \
+  --parameters '{
+    "name": "jwt-client-app-federation",
+    "issuer": "'$SPIRE_OIDC_URL'",
+    "subject": "spiffe://your-trust-domain/ns/oidc-postgres-demo/sa/jwt-client-app-sa",
+    "audiences": ["'$APP_ID'"]
+  }'
+```
+
+### 5. Test Option B Demo
+
+Access the pgjwt demo UI:
+```
+https://jwt-client-app-oidc-postgres-demo.apps.your-cluster.example.com
+```
+
+Or via curl:
+```bash
+curl -sk https://jwt-client-app-oidc-postgres-demo.apps.your-cluster.example.com/api/full-demo | jq .
+```
+
 ---
 
 ## Folder Structure
@@ -381,12 +546,21 @@ oidc-postgres-demo/
 ├── k8s/
 │   ├── namespace.yaml           # Namespace definition
 │   ├── clusterspiffeid.yaml     # SPIRE workload registration
-│   ├── postgresql.yaml          # PostgreSQL deployment
-│   └── client-app.yaml          # SPIFFE client deployment
-└── client-app/
-    ├── app.py                   # Flask app with SPIFFE + Entra ID + PostgreSQL
+│   ├── postgresql.yaml          # PostgreSQL deployment (Option A)
+│   └── client-app.yaml          # SPIFFE client deployment (Option A)
+├── client-app/                  # Option A: Client-side validation
+│   ├── app.py                   # Flask app with client-side token validation
+│   ├── requirements.txt
+│   └── Dockerfile
+├── postgres-jwt/                # Option B: PostgreSQL with pgjwt
+│   ├── Dockerfile               # Custom PostgreSQL image with pgjwt
+│   ├── init-jwt.sql             # Database setup with RLS policies
+│   └── k8s-manifests.yaml       # Kubernetes deployment
+└── client-app-jwt/              # Option B: Client app for pgjwt demo
+    ├── app.py                   # Flask app that passes token to PostgreSQL
     ├── requirements.txt
-    └── Dockerfile
+    ├── Dockerfile
+    └── k8s-manifests.yaml       # Kubernetes deployment with SPIFFE
 ```
 
 ---

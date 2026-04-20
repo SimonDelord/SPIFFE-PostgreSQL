@@ -1,0 +1,143 @@
+# Client App for PostgreSQL JWT Validation Demo
+# This app gets JWT-SVID from SPIRE, exchanges for Entra ID token,
+# then passes the token to PostgreSQL for validation
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jwt-client-app-sa
+  namespace: oidc-postgres-demo
+
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: jwt-client-app
+  namespace: oidc-postgres-demo
+
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: jwt-client-app
+  namespace: oidc-postgres-demo
+spec:
+  source:
+    type: Binary
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Dockerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: jwt-client-app:latest
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jwt-client-app
+  namespace: oidc-postgres-demo
+  labels:
+    app: jwt-client-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jwt-client-app
+  template:
+    metadata:
+      labels:
+        app: jwt-client-app
+        spiffe.io/spiffe-id: "jwt-client-app"
+    spec:
+      serviceAccountName: jwt-client-app-sa
+      containers:
+        - name: app
+          image: image-registry.openshift-image-registry.svc:5000/oidc-postgres-demo/jwt-client-app:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: "unix:///spiffe-workload-api/spire-agent.sock"
+            - name: AZURE_TENANT_ID
+              value: "64dc69e4-d083-49fc-9569-ebece1dd1408"
+            - name: AZURE_CLIENT_ID
+              value: "f63d6f2e-f780-4568-a69a-93a07cd8c5db"
+            - name: DB_HOST
+              value: "postgres-jwt.oidc-postgres-demo.svc.cluster.local"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_NAME
+              value: "demo"
+            - name: DB_USER
+              value: "jwt_client"
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-jwt-password
+                  key: JWT_CLIENT_PASSWORD
+          volumeMounts:
+            - name: spiffe-workload-api
+              mountPath: /spiffe-workload-api
+              readOnly: true
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+      volumes:
+        - name: spiffe-workload-api
+          csi:
+            driver: "csi.spiffe.io"
+            readOnly: true
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jwt-client-app
+  namespace: oidc-postgres-demo
+spec:
+  selector:
+    app: jwt-client-app
+  ports:
+    - port: 8080
+      targetPort: 8080
+  type: ClusterIP
+
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: jwt-client-app
+  namespace: oidc-postgres-demo
+spec:
+  to:
+    kind: Service
+    name: jwt-client-app
+  port:
+    targetPort: 8080
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+
+---
+# ClusterSPIFFEID to register this workload with SPIRE
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: jwt-client-app-workload
+spec:
+  className: zero-trust-workload-identity-manager-spire
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}"
+  podSelector:
+    matchLabels:
+      spiffe.io/spiffe-id: "jwt-client-app"
+  namespaceSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: spiffe-demo
+  ttl: "1h"
