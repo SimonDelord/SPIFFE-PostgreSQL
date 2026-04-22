@@ -201,6 +201,59 @@ $ curl -sk https://db-client-app-spiffe-edb-demo.apps.rosa.rosa-v99n5.8ie9.p3.op
 }
 ```
 
+### View the FULL certificate chain
+
+The app exposes an endpoint that shows the complete certificate chain:
+
+```bash
+$ curl -sk https://db-client-app-spiffe-edb-demo.apps.rosa.rosa-v99n5.8ie9.p3.openshiftapps.com/api/certificate-chain | jq .
+```
+
+**Output:**
+```json
+{
+  "chain_length": 2,
+  "chain_summary": "app_readonly → SPIRE Server CA",
+  "chain_description": [
+    "SVID (app_readonly) → signed by → SPIRE Server CA",
+    "SPIRE Server CA → signed by → SPIFFE Root CA"
+  ],
+  "certificates": [
+    {
+      "position": 1,
+      "type": "Workload SVID",
+      "subject": { "commonName": "app_readonly", "organization": "SPIRE", "country": "US" },
+      "issuer": { "commonName": "SPIRE Server CA", "organization": "My Organization", "country": "US" },
+      "san_uris": ["spiffe://apps.rosa.rosa-v99n5.8ie9.p3.openshiftapps.com/ns/spiffe-edb-demo/sa/db-client-app"]
+    },
+    {
+      "position": 2,
+      "type": "CA Certificate 1",
+      "subject": { "commonName": "SPIRE Server CA", "organization": "My Organization", "country": "US" },
+      "issuer": { "commonName": "SPIFFE Root CA", "organization": "My Organization", "country": "US" },
+      "san_uris": ["spiffe://apps.rosa.rosa-v99n5.8ie9.p3.openshiftapps.com"]
+    }
+  ],
+  "trust_chain": "SVID → SPIRE Intermediate CA → Root CA"
+}
+```
+
+### Why the browser shows the OpenShift certificate (not the SPIFFE certificate)
+
+If you inspect the certificate in your browser, you'll see the OpenShift router certificate (*.apps.rosa...), NOT the SPIFFE certificate. This is expected:
+
+```
+┌──────────┐      HTTPS       ┌─────────────────┐      HTTP        ┌──────────────┐      mTLS       ┌────────────┐
+│  Browser │ ───────────────► │ OpenShift Router│ ───────────────► │  Client App  │ ──────────────► │ PostgreSQL │
+└──────────┘                  └─────────────────┘                  └──────────────┘                 └────────────┘
+       ↑                             ↑                                    ↑
+       │                             │                                    │
+ Browser sees                  TLS terminated                       SPIFFE X.509-SVID
+ OpenShift cert                here                                 used here (internal)
+```
+
+The SPIFFE certificate is used for **internal mTLS** between the client app and PostgreSQL, NOT for browser traffic. Use the `/api/certificate-chain` endpoint above to see the actual SPIFFE certificate chain.
+
 **Certificate Chain:**
 - **Subject:** `app_readonly` (the workload identity)
 - **Issuer:** `SPIRE Server CA` (the intermediate CA)
