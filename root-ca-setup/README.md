@@ -1,319 +1,193 @@
-# Root CA Setup for SPIRE
+# SPIRE Intermediate CA Setup with Disk-based Upstream Authority
 
-This guide explains how to configure SPIRE to use a long-lived Root CA, eliminating the need to update trust bundles when SPIRE's intermediate CA rotates.
-
-## Table of Contents
-
-- [The Problem](#the-problem)
-- [The Solution: SPIRE as Intermediate CA](#the-solution-spire-as-intermediate-ca)
-- [Architecture](#architecture)
-- [Setup Steps](#setup-steps)
-- [Verification](#verification)
-- [Troubleshooting](#troubleshooting)
-
----
-
-## The Problem
-
-By default, SPIRE operates as its own Certificate Authority with a short-lived CA (24 hours in our setup). When this CA rotates:
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                     THE PROBLEM: CA ROTATION BREAKS TRUST                    │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  Day 1: Everything works                                                    │
-│  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐                │
-│  │ SPIRE CA     │────►│ Client App   │────►│ PostgreSQL   │                │
-│  │ (Root CA A)  │     │ (Cert from A)│     │ (Trusts A)   │                │
-│  └──────────────┘     └──────────────┘     └──────────────┘                │
-│                                              ✓ Connection OK                │
-│                                                                              │
-│  Day 2: SPIRE CA rotates                                                    │
-│  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐                │
-│  │ SPIRE CA     │────►│ Client App   │────►│ PostgreSQL   │                │
-│  │ (Root CA B)  │     │ (Cert from B)│     │ (Trusts A)   │                │
-│  └──────────────┘     └──────────────┘     └──────────────┘                │
-│                                              ✗ SSL ERROR!                   │
-│                                              "unknown ca"                   │
-│                                                                              │
-│  Manual fix required: Update PostgreSQL's CA bundle                        │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-**Impact:**
-- PostgreSQL stops trusting client certificates after SPIRE CA rotation
-- Manual intervention required every 24 hours
-- Production systems break unexpectedly
-
----
-
-## The Solution: SPIRE as Intermediate CA
-
-Configure SPIRE to operate as an **intermediate CA** under a long-lived **Root CA**:
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│              THE SOLUTION: SPIRE AS INTERMEDIATE CA                          │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │                     Root CA (10 years)                                 │  │
-│  │                     CN: Demo Root CA                                   │  │
-│  │                     ┌─────────────────────────────────┐               │  │
-│  │                     │ This is what PostgreSQL trusts  │               │  │
-│  │                     └─────────────────────────────────┘               │  │
-│  └──────────────────────────────┬────────────────────────────────────────┘  │
-│                                 │                                            │
-│                                 │ Signs                                      │
-│                                 ▼                                            │
-│  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │                SPIRE Intermediate CA (24 hours)                        │  │
-│  │                CN: SPIRE Server CA                                     │  │
-│  │                ┌──────────────────────────────────────┐               │  │
-│  │                │ This rotates, but chain still valid │               │  │
-│  │                └──────────────────────────────────────┘               │  │
-│  └──────────────────────────────┬────────────────────────────────────────┘  │
-│                                 │                                            │
-│                                 │ Signs                                      │
-│                                 ▼                                            │
-│  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │                   Workload Certificates (1 hour)                       │  │
-│  │                   spiffe://trust-domain/ns/.../sa/...                 │  │
-│  └───────────────────────────────────────────────────────────────────────┘  │
-│                                                                              │
-│  PostgreSQL trusts Root CA → All intermediate CAs are trusted              │
-│  SPIRE CA can rotate → No manual intervention needed                       │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-**Benefits:**
-- PostgreSQL only needs to trust the Root CA (10-year validity)
-- SPIRE CA can rotate freely without breaking trust chains
-- No manual intervention required for CA rotation
-- Follows PKI best practices (short-lived intermediates, long-lived root)
-
----
+This document describes how to configure SPIRE to use an **intermediate CA** signed by a long-lived **root CA**, solving the certificate rotation issues where applications need to be reconfigured every time SPIRE's CA rotates.
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         CERTIFICATE HIERARCHY                                │
+│                    INTERMEDIATE CA ARCHITECTURE                              │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
-│  Level 0: Root CA                                                           │
-│  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │  Subject: CN=Demo Root CA, O=Demo Organization                        │  │
-│  │  Validity: 10 years                                                   │  │
-│  │  Key Usage: Certificate Sign, CRL Sign                                │  │
-│  │  Basic Constraints: CA:TRUE                                           │  │
-│  │                                                                        │  │
-│  │  Storage: Kubernetes Secret (root-ca-secret)                          │  │
-│  │  Used by: PostgreSQL SSL configuration (trust anchor)                 │  │
-│  └───────────────────────────────────────────────────────────────────────┘  │
-│                                 │                                            │
-│                                 │                                            │
-│  Level 1: SPIRE Intermediate CA                                             │
-│  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │  Subject: CN=SPIRE Server CA, O=My Organization                       │  │
-│  │  Validity: 24 hours (auto-rotates)                                    │  │
-│  │  Key Usage: Certificate Sign, CRL Sign                                │  │
-│  │  Basic Constraints: CA:TRUE, pathlen:0                                │  │
-│  │                                                                        │  │
-│  │  Managed by: SPIRE Server (upstream_authority: disk)                  │  │
-│  │  Signed by: Root CA                                                   │  │
-│  └───────────────────────────────────────────────────────────────────────┘  │
-│                                 │                                            │
-│                                 │                                            │
-│  Level 2: Workload Certificates (X.509 SVIDs)                               │
-│  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │  Subject: O=SPIFFE, CN=<workload-name>                                │  │
-│  │  SAN: URI:spiffe://trust-domain/ns/namespace/sa/service-account       │  │
-│  │  Validity: 1 hour (auto-rotates)                                      │  │
-│  │  Key Usage: Digital Signature, Key Encipherment                       │  │
-│  │                                                                        │  │
-│  │  Issued by: SPIRE Server                                              │  │
-│  │  Used for: mTLS between workloads                                     │  │
-│  └───────────────────────────────────────────────────────────────────────┘  │
+│   ┌─────────────────────────────────────────────────────────────────┐       │
+│   │                     ROOT CA (Long-lived)                         │       │
+│   │                     Validity: 10 years                           │       │
+│   │                     CN: SPIFFE Root CA                           │       │
+│   │                     Stored: Kubernetes Secret                    │       │
+│   └──────────────────────────────┬──────────────────────────────────┘       │
+│                                  │                                           │
+│                                  │ Signs (via UpstreamAuthority plugin)      │
+│                                  ▼                                           │
+│   ┌─────────────────────────────────────────────────────────────────┐       │
+│   │                SPIRE Intermediate CA                             │       │
+│   │                Validity: 1 year (configurable)                   │       │
+│   │                CN: SPIRE Server CA                               │       │
+│   │                Managed by: SPIRE Server                          │       │
+│   └──────────────────────────────┬──────────────────────────────────┘       │
+│                                  │                                           │
+│                                  │ Signs                                     │
+│                                  ▼                                           │
+│   ┌─────────────────────────────────────────────────────────────────┐       │
+│   │              Workload X.509-SVIDs                                │       │
+│   │              Validity: 1 hour (default)                          │       │
+│   │              Issued to: Pods/Workloads                           │       │
+│   └─────────────────────────────────────────────────────────────────┘       │
+│                                                                              │
+│   BENEFIT: Applications only need to trust the ROOT CA                       │
+│            SPIRE can rotate its intermediate CA without breaking trust       │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
----
+## Prerequisites
+
+- OpenShift cluster with Zero Trust Workload Identity Manager operator installed
+- `oc` CLI with cluster-admin access
+- `openssl` for certificate generation
 
 ## Setup Steps
 
-### Step 1: Generate the Root CA
+### Step 1: Create the Root CA
 
 ```bash
-# Create directory for CA files
-mkdir -p /tmp/root-ca
-cd /tmp/root-ca
+# Create directory for certificates
+mkdir -p certs && cd certs
 
 # Generate Root CA private key (4096-bit RSA)
 openssl genrsa -out root-ca.key 4096
 
-# Generate Root CA certificate (10 years validity)
-openssl req -x509 -new -nodes \
-  -key root-ca.key \
-  -sha256 \
-  -days 3650 \
+# Create Root CA certificate (10 years validity)
+openssl req -x509 -new -nodes -key root-ca.key -sha256 -days 3650 \
   -out root-ca.crt \
-  -subj "/C=US/O=Demo Organization/CN=Demo Root CA"
+  -subj "/C=US/ST=State/L=City/O=My Organization/OU=SPIFFE Root CA/CN=SPIFFE Root CA"
 
-# Verify the Root CA
+# Verify the certificate
 openssl x509 -in root-ca.crt -text -noout | grep -E "Subject:|Issuer:|Not Before|Not After"
 ```
 
-### Step 2: Create Kubernetes Secret for Root CA
+### Step 2: Create Kubernetes Secret
 
 ```bash
-# Create secret in the SPIRE namespace
+# Create secret with root CA cert and key
 oc create secret generic spire-upstream-ca \
-  -n zero-trust-workload-identity-manager \
-  --from-file=root-ca.crt=root-ca.crt \
-  --from-file=root-ca.key=root-ca.key
-```
-
-### Step 3: Configure SPIRE to Use Upstream Authority
-
-Update the SPIRE Server configuration to use the disk upstream authority:
-
-```yaml
-apiVersion: operator.openshift.io/v1alpha1
-kind: SpireServer
-metadata:
-  name: cluster
-  namespace: zero-trust-workload-identity-manager
-spec:
-  caSubject:
-    commonName: SPIRE Server CA
-    country: US
-    organization: My Organization
-  caValidity: 24h
-  defaultX509Validity: 1h
-  defaultJWTValidity: 5m
-  # Add upstream authority configuration
-  upstreamAuthority:
-    disk:
-      certFilePath: /run/spire/upstream-ca/root-ca.crt
-      keyFilePath: /run/spire/upstream-ca/root-ca.key
-```
-
-### Step 4: Mount the Secret in SPIRE Server
-
-The SPIRE Server StatefulSet needs to mount the upstream CA secret:
-
-```yaml
-# Add to SPIRE Server StatefulSet
-volumeMounts:
-  - name: upstream-ca
-    mountPath: /run/spire/upstream-ca
-    readOnly: true
-volumes:
-  - name: upstream-ca
-    secret:
-      secretName: spire-upstream-ca
-```
-
-### Step 5: Update PostgreSQL to Trust Root CA
-
-```bash
-# Create/update the CA bundle secret for PostgreSQL
-oc create secret generic spire-ca-bundle \
-  -n spiffe-edb-demo \
   --from-file=ca.crt=root-ca.crt \
-  --dry-run=client -o yaml | oc apply -f -
-
-# Restart PostgreSQL to pick up the new CA
-oc rollout restart statefulset/edb-spiffe-postgres -n spiffe-edb-demo
+  --from-file=ca.key=root-ca.key \
+  -n zero-trust-workload-identity-manager
 ```
 
----
+### Step 3: Patch SPIRE Server ConfigMap
 
-## Verification
-
-### Check Certificate Chain
+The key is to:
+1. Add the `UpstreamAuthority` plugin to the SPIRE server config
+2. Set the ConfigMap as **immutable** to prevent the operator from overwriting it
 
 ```bash
-# Get a workload certificate and verify the chain
-oc exec -n spiffe-edb-demo deploy/spiffe-edb-client -- \
-  cat /spiffe-workload-api/svid.0.pem | \
-  openssl verify -CAfile root-ca.crt -untrusted /dev/stdin
+# Get current config
+CONFIG=$(oc get configmap spire-server -n zero-trust-workload-identity-manager -o jsonpath='{.data.server\.conf}')
 
-# Expected output: stdin: OK
+# Add UpstreamAuthority plugin
+NEW_CONFIG=$(echo "$CONFIG" | jq '.plugins.UpstreamAuthority = [{"disk": {"plugin_data": {"cert_file_path": "/run/spire/upstream-ca/ca.crt", "key_file_path": "/run/spire/upstream-ca/ca.key"}}}]')
+
+# Patch ConfigMap with UpstreamAuthority AND set immutable: true
+oc patch configmap spire-server -n zero-trust-workload-identity-manager \
+  --type='merge' \
+  -p="{\"immutable\": true, \"data\": {\"server.conf\": $(echo "$NEW_CONFIG" | jq -c . | jq -Rs .)}}"
 ```
 
-### Check SPIRE Server Logs
+### Step 4: Patch SPIRE Server StatefulSet
+
+Mount the root CA secret into the SPIRE server pod:
 
 ```bash
-oc logs -n zero-trust-workload-identity-manager -l app.kubernetes.io/name=server --tail=50 | \
-  grep -i "upstream"
+oc patch statefulset spire-server -n zero-trust-workload-identity-manager --type='json' -p='[
+  {"op": "add", "path": "/spec/template/spec/volumes/-", "value": {"name": "upstream-ca", "secret": {"secretName": "spire-upstream-ca"}}},
+  {"op": "add", "path": "/spec/template/spec/containers/0/volumeMounts/-", "value": {"name": "upstream-ca", "mountPath": "/run/spire/upstream-ca", "readOnly": true}}
+]'
 ```
 
-### Test mTLS Connection
+### Step 5: Restart SPIRE Server
 
 ```bash
-# The client should be able to connect without CA bundle updates
-oc exec -n spiffe-edb-demo deploy/spiffe-edb-client -- \
-  curl -sk https://your-postgres-endpoint
+# Delete the pod to trigger restart with new config
+oc delete pod spire-server-0 -n zero-trust-workload-identity-manager
+
+# Wait for pod to come back
+oc get pods -n zero-trust-workload-identity-manager -w
 ```
 
----
+### Step 6: Verify
 
-## Troubleshooting
-
-### SPIRE Server Fails to Start
-
-Check if the secret is mounted correctly:
+Check the SPIRE server logs to confirm the UpstreamAuthority plugin is loaded:
 
 ```bash
-oc exec -n zero-trust-workload-identity-manager spire-server-0 -- \
-  ls -la /run/spire/upstream-ca/
+oc logs spire-server-0 -n zero-trust-workload-identity-manager -c spire-server | grep -i upstream
 ```
 
-### Certificate Chain Verification Fails
-
-Ensure the Root CA certificate is the same one used to sign SPIRE's intermediate:
-
-```bash
-# Get SPIRE's current CA
-oc get configmap spire-bundle -n zero-trust-workload-identity-manager \
-  -o jsonpath='{.data.bundle\.crt}' | openssl x509 -text -noout
-
-# Check if it's signed by our Root CA
-oc get configmap spire-bundle -n zero-trust-workload-identity-manager \
-  -o jsonpath='{.data.bundle\.crt}' | \
-  openssl verify -CAfile root-ca.crt
+You should see:
+```
+level=info msg="Plugin loaded" external=false plugin_name=disk plugin_type=UpstreamAuthority
 ```
 
-### PostgreSQL Still Rejects Connections
+## Files in this Directory
 
-Verify PostgreSQL is using the correct CA bundle:
-
-```bash
-oc exec -n spiffe-edb-demo edb-spiffe-postgres-0 -- \
-  cat /etc/ssl/certs/spire-ca.crt | openssl x509 -text -noout
-```
-
----
+| File | Description |
+|------|-------------|
+| `certs/root-ca.crt` | Root CA certificate (10-year validity) |
+| `certs/root-ca.key` | Root CA private key (KEEP SECURE!) |
+| `spire-upstream-ca-secret.yaml` | Kubernetes Secret manifest |
+| `spire-server-configmap-patch.yaml` | ConfigMap patch (for reference) |
 
 ## Important Notes
 
-1. **Root CA Security**: The Root CA private key should be stored securely. Consider using:
-   - HashiCorp Vault
-   - AWS Secrets Manager
-   - Azure Key Vault
-   - Hardware Security Module (HSM)
+### ConfigMap Immutability
 
-2. **Root CA Rotation**: Even with a 10-year validity, plan for Root CA rotation before expiry.
+Setting `immutable: true` on the ConfigMap prevents the Zero Trust Workload Identity Manager operator from reverting our changes. However, this also means:
+- You cannot modify the ConfigMap without deleting and recreating it
+- If you need to change the config, you'll need to delete the ConfigMap first
 
-3. **Backup**: Always backup the Root CA certificate and key in a secure location.
+### Root CA Security
 
-4. **Monitoring**: Set up alerts for:
-   - Root CA expiry (e.g., 6 months before)
-   - Certificate chain validation failures
-   - SPIRE intermediate CA rotation failures
+The root CA private key (`root-ca.key`) is highly sensitive:
+- In production, store it in an HSM or secure vault
+- Consider using a shorter-lived intermediate if the root key is on disk
+- Limit access to the Kubernetes Secret
+
+### Certificate Chain
+
+When SPIRE mints a new intermediate CA:
+1. It requests signing from the UpstreamAuthority plugin
+2. The plugin signs with the root CA
+3. Workload SVIDs chain: `Workload → SPIRE Intermediate → Root CA`
+
+Applications trusting the root CA will automatically trust all workload certificates.
+
+## Troubleshooting
+
+### ConfigMap reverts to original
+
+If the operator keeps overwriting changes:
+1. Ensure `immutable: true` is set on the ConfigMap
+2. Check operator logs for errors
+
+### SPIRE server fails to start
+
+Check logs for certificate loading errors:
+```bash
+oc logs spire-server-0 -n zero-trust-workload-identity-manager -c spire-server | grep -i error
+```
+
+Common issues:
+- Incorrect file paths in UpstreamAuthority config
+- Certificate/key mismatch
+- Permissions issues on mounted files
+
+### Verify certificate chain
+
+To verify a workload certificate chains to the root CA:
+```bash
+# Get root CA
+ROOT_CA=$(oc get secret spire-upstream-ca -n zero-trust-workload-identity-manager -o jsonpath='{.data.ca\.crt}' | base64 -d)
+
+# Verify workload cert (example)
+echo "$WORKLOAD_CERT" | openssl verify -CAfile <(echo "$ROOT_CA")
+```
