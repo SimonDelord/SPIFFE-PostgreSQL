@@ -167,6 +167,7 @@ HTML_TEMPLATE = '''
         <p>Click to fetch your workload's SPIFFE identity from SPIRE:</p>
         <button class="btn btn-primary" onclick="fetchIdentity()">Fetch SPIFFE Identity</button>
         <button class="btn btn-info" onclick="fetchCertDetails()">View Certificate Details</button>
+        <button class="btn btn-warning" onclick="fetchCertChain()">View Full Certificate Chain</button>
         <div id="identity-result" class="result" style="display:none;"></div>
     </div>
 
@@ -262,6 +263,23 @@ HTML_TEMPLATE = '''
             
             try {
                 const response = await fetch('/api/certificate');
+                const data = await response.json();
+                result.className = data.error ? 'result error' : 'result success';
+                result.textContent = JSON.stringify(data, null, 2);
+            } catch (e) {
+                result.className = 'result error';
+                result.textContent = 'Error: ' + e.message;
+            }
+        }
+
+        async function fetchCertChain() {
+            const result = document.getElementById('identity-result');
+            result.style.display = 'block';
+            result.className = 'result';
+            result.textContent = 'Fetching full certificate chain...';
+            
+            try {
+                const response = await fetch('/api/certificate-chain');
                 const data = await response.json();
                 result.className = data.error ? 'result error' : 'result success';
                 result.textContent = JSON.stringify(data, null, 2);
