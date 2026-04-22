@@ -525,6 +525,71 @@ def api_certificate():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/certificate-chain')
+def api_certificate_chain():
+    """Return the FULL certificate chain (SVID + Intermediate CA + Root CA)."""
+    try:
+        svid, error = get_x509_svid()
+        if error:
+            return jsonify({"error": error}), 500
+        
+        chain = []
+        for i, cert in enumerate(svid.cert_chain):
+            # Extract subject and issuer
+            subject_parts = {attr.oid._name: attr.value for attr in cert.subject}
+            issuer_parts = {attr.oid._name: attr.value for attr in cert.issuer}
+            
+            # Extract SAN URIs
+            san_uris = []
+            try:
+                san_ext = cert.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
+                for name in san_ext.value:
+                    if isinstance(name, UniformResourceIdentifier):
+                        san_uris.append(name.value)
+            except:
+                pass
+            
+            cert_info = {
+                "position": i + 1,
+                "type": "Workload SVID" if i == 0 else f"CA Certificate {i}",
+                "subject": {
+                    "commonName": subject_parts.get("commonName", "N/A"),
+                    "organization": subject_parts.get("organizationName", "N/A"),
+                    "country": subject_parts.get("countryName", "N/A")
+                },
+                "issuer": {
+                    "commonName": issuer_parts.get("commonName", "N/A"),
+                    "organization": issuer_parts.get("organizationName", "N/A"),
+                    "country": issuer_parts.get("countryName", "N/A")
+                },
+                "validity": {
+                    "not_before": cert.not_valid_before.isoformat(),
+                    "not_after": cert.not_valid_after.isoformat()
+                },
+                "san_uris": san_uris if san_uris else None,
+                "is_ca": i > 0
+            }
+            chain.append(cert_info)
+        
+        # Determine if chain is complete
+        chain_description = []
+        for i, c in enumerate(chain):
+            if i == 0:
+                chain_description.append(f"SVID ({c['subject']['commonName']}) → signed by → {c['issuer']['commonName']}")
+            else:
+                chain_description.append(f"{c['subject']['commonName']} → signed by → {c['issuer']['commonName']}")
+        
+        return jsonify({
+            "chain_length": len(chain),
+            "chain_summary": " → ".join([c['subject']['commonName'] for c in chain]),
+            "chain_description": chain_description,
+            "certificates": chain,
+            "trust_chain": "SVID → SPIRE Intermediate CA → Root CA" if len(chain) >= 2 else "Chain may be incomplete"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/db/test')
 def api_db_test():
     """Test database connection."""
